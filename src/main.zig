@@ -114,3 +114,22 @@ test "batched matrix multiplication" {
     // Batch 1: 2*Identity * [1,1,1,1] = [2,2,2,2]
     try std.testing.expectEqual(@as(f32, 2.0), res.at(&[_]usize{ 1, 1, 1 }));
 }
+
+test "tensor sum reduction" {
+    const allocator = std.testing.allocator;
+
+    // 2x3 Matrix
+    // [1, 2, 3]
+    // [4, 5, 6]
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer t.deinit();
+
+    // Reduce along axis 0 (rows) -> Result should be [5, 7, 9]
+    var res = try t.sum(allocator, 0);
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), res.shape.len);
+    try std.testing.expectEqual(@as(f32, 5.0), res.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(f32, 7.0), res.at(&[_]usize{1}));
+    try std.testing.expectEqual(@as(f32, 9.0), res.at(&[_]usize{2}));
+}

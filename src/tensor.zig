@@ -159,6 +159,15 @@ pub fn Tensor(comptime T: type) type {
             return total;
         }
 
+        /// Converts multi-dimensional indices to a flat data offset
+        pub fn calculateOffset(self: Self, indices: []const usize) usize {
+            var offset: usize = 0;
+            for (indices, 0..) |idx, i| {
+                offset += idx * self.strides[i];
+            }
+            return offset;
+        }
+
         pub fn at(self: Self, indices: []const usize) T {
             var offset: usize = 0;
             for (indices, 0..) |idx, i| {
@@ -189,6 +198,32 @@ pub fn Tensor(comptime T: type) type {
 
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
             return linalg.matmul(dest, self, other);
+        }
+
+        pub fn sum(self: Self, allocator: std.mem.Allocator, axis: usize) !Self {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+
+            // Create the smaller shape
+            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
+            defer allocator.free(new_shape);
+            var d: usize = 0;
+            for (self.shape, 0..) |s, i| {
+                if (i == axis) continue;
+                new_shape[d] = s;
+                d += 1;
+            }
+
+            var dest = try Self.init(allocator, new_shape);
+
+            // Reduction closure
+            const closures = struct {
+                fn add(acc: *@TypeOf(self.data()[0]), val: @TypeOf(self.data()[0])) void {
+                    acc.* += val;
+                }
+            };
+
+            ops.reduce(&dest, self, axis, @as(T, 0), closures.add);
+            return dest;
         }
     };
 }

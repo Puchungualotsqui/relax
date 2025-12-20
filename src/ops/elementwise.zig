@@ -100,3 +100,45 @@ pub fn add(self: anytype, other: anytype) TensorError!void {
         self.storage.data[i] += other.storage.data[i];
     }
 }
+
+pub fn reduce(dest: anytype, src: anytype, axis: usize, comptime init_val: anytype, comptime op: anytype) void {
+    const s_ndim = src.shape.len;
+    dest.fill(init_val);
+
+    const total_src_elements = src.storage.data.len;
+    var indices = [_]usize{0} ** 16;
+
+    // We maintain the src_offset manually as we increment indices
+    var src_offset: usize = 0;
+
+    for (0..total_src_elements) |_| {
+        // 1. Find destination mapping
+        var dest_offset: usize = 0;
+        var d_dim: usize = 0;
+        for (0..s_ndim) |s_dim| {
+            if (s_dim == axis) continue;
+            dest_offset += indices[s_dim] * dest.strides[d_dim];
+            d_dim += 1;
+        }
+
+        // 2. Perform the operation
+        op(&dest.storage.data[dest_offset], src.storage.data[src_offset]);
+
+        // 3. Increment indices and update src_offset
+        var j = s_ndim;
+        while (j > 0) {
+            j -= 1;
+            indices[j] += 1;
+            if (indices[j] < src.shape[j]) {
+                // If we didn't wrap, we just add the stride of this dimension
+                src_offset += src.strides[j];
+                break;
+            } else {
+                // If we wrap (e.g., index 3 becomes 0 in a dim of size 3),
+                // we must subtract the "distance" covered by that dimension
+                src_offset -= (src.shape[j] - 1) * src.strides[j];
+                indices[j] = 0;
+            }
+        }
+    }
+}
