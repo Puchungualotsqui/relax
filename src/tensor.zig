@@ -23,25 +23,36 @@ pub fn Tensor(comptime T: type) type {
             }
         };
 
+        data: []T,
         storage: *Storage,
         shape: []usize,
         strides: []usize,
         allocator: Allocator,
+        view_start: usize = 0,
 
         pub fn init(allocator: Allocator, shape: []const usize) !Self {
             const size = calculateSize(shape);
+
             const storage = try allocator.create(Storage);
+            errdefer allocator.destroy(storage);
+
+            const raw_data = try allocator.alloc(T, size);
+            errdefer allocator.free(raw_data);
 
             storage.* = .{
-                .data = try allocator.alloc(T, size),
+                .data = raw_data,
                 .ref_count = 1,
                 .allocator = allocator,
             };
 
             const shape_copy = try allocator.dupe(usize, shape);
+            errdefer allocator.free(shape_copy);
+
             const strides = try allocator.alloc(usize, shape.len);
+            errdefer allocator.free(strides);
 
             var self = Self{
+                .data = raw_data,
                 .storage = storage,
                 .shape = shape_copy,
                 .strides = strides,
@@ -55,11 +66,6 @@ pub fn Tensor(comptime T: type) type {
             self.allocator.free(self.shape);
             self.allocator.free(self.strides);
             self.storage.deinit();
-        }
-
-        // Helper getters
-        pub fn data(self: Self) []T {
-            return self.storage.data;
         }
 
         // Helper to check if memory is contiguous (needed for SIMD)
@@ -76,23 +82,23 @@ pub fn Tensor(comptime T: type) type {
 
         pub fn fromSlice(allocator: Allocator, shape: []const usize, values: []const T) !Self {
             var self = try Self.init(allocator, shape);
-            if (values.len != self.storage.data.len) {
+            if (values.len != calculateSize(shape)) {
                 self.deinit();
                 return error.IncompatibleShapes;
             }
-            @memcpy(self.storage.data, values);
+            @memcpy(self.data, values);
             return self;
         }
 
         // Creates a fresh, contiguous copy of the tensor
         pub fn clone(self: Self) !Self {
             var new_tensor = try Self.init(self.allocator, self.shape);
+
             // If self is contiguous, we can use fast @memcpy
             if (self.isContiguous()) {
-                @memcpy(new_tensor.storage.data, self.storage.data);
+                const size = calculateSize(self.shape);
+                @memcpy(new_tensor.data, self.data[0..size]);
             } else {
-                // Slower path for non-contiguous (like transposed) tensors
-                // This "realizes" the view into a new linear block
                 try self.copyTo(&new_tensor);
             }
             return new_tensor;
@@ -173,11 +179,57 @@ pub fn Tensor(comptime T: type) type {
             for (indices, 0..) |idx, i| {
                 offset += idx * self.strides[i];
             }
-            return self.storage.data[offset];
+            return self.data[offset];
         }
 
         pub fn fill(self: *Self, value: T) void {
-            @memset(self.storage.data, value);
+            if (self.isContiguous()) {
+                const size = calculateSize(self.shape);
+                @memset(self.data[0..size], value);
+            } else {
+                self.fillStrided(self.data, 0, 0, value);
+            }
+        }
+
+        // Helper for non-contiguous filling
+        fn fillStrided(self: *Self, buffer: []T, dim: usize, offset: usize, value: T) void {
+            if (dim == self.shape.len - 1) {
+                const stride = self.strides[dim];
+                var ptr = offset;
+                for (0..self.shape[dim]) |_| {
+                    buffer[ptr] = value;
+                    ptr += stride;
+                }
+            } else {
+                const stride = self.strides[dim];
+                var ptr = offset;
+                for (0..self.shape[dim]) |_| {
+                    self.fillStrided(buffer, dim + 1, ptr, value);
+                    ptr += stride;
+                }
+            }
+        }
+
+        pub fn slice(self: *Self, axis: usize, start: usize, end: usize) !Self {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+            if (start >= end or end > self.shape[axis]) return error.InvalidRange;
+
+            const offset = start * self.strides[axis];
+
+            const new_shape = try self.allocator.dupe(usize, self.shape);
+            const new_strides = try self.allocator.dupe(usize, self.strides);
+
+            new_shape[axis] = end - start;
+
+            self.storage.ref_count += 1;
+
+            return Self{
+                .data = self.data[offset..],
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
         }
 
         pub fn concatenate(allocator: std.mem.Allocator, tensors: []const Self, axis: usize) !Self {
@@ -238,8 +290,9 @@ pub fn Tensor(comptime T: type) type {
             var dest = try Self.init(allocator, new_shape);
 
             // Reduction closure
+            // We use 'T' directly here because it is visible in this scope
             const closures = struct {
-                fn add(acc: *@TypeOf(self.data()[0]), val: @TypeOf(self.data()[0])) void {
+                fn add(acc: *T, val: T) void {
                     acc.* += val;
                 }
             };

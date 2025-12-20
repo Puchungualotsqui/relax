@@ -154,3 +154,37 @@ test "tensor concatenation" {
     try std.testing.expectEqual(@as(f32, 1.0), res.at(&[_]usize{ 0, 0 }));
     try std.testing.expectEqual(@as(f32, 3.0), res.at(&[_]usize{ 1, 0 }));
 }
+
+test "tensor slicing" {
+    const allocator = std.testing.allocator;
+
+    // 4x4 Matrix:
+    //  0   1   2   3
+    //  4   5   6   7
+    //  8   9  10  11
+    // 12  13  14  15
+    var t = try Tensor(f32).init(allocator, &[_]usize{ 4, 4 });
+    defer t.deinit();
+
+    // Fill with 0..15
+    for (0..16) |i| t.data[i] = @as(f32, @floatFromInt(i));
+
+    // Slice rows 1 to 3 (exclusive) -> Rows 1 and 2
+    //  4   5   6   7
+    //  8   9  10  11
+    var view = try t.slice(0, 1, 3);
+    defer view.deinit(); // Decrements ref_count, doesn't free storage yet
+
+    try std.testing.expectEqual(@as(usize, 2), view.shape[0]);
+    try std.testing.expectEqual(@as(usize, 4), view.shape[1]);
+
+    // Check data
+    // view.at(0, 0) should be t.at(1, 0) -> 4
+    try std.testing.expectEqual(@as(f32, 4.0), view.at(&[_]usize{ 0, 0 }));
+    // view.at(1, 3) should be t.at(2, 3) -> 11
+    try std.testing.expectEqual(@as(f32, 11.0), view.at(&[_]usize{ 1, 3 }));
+
+    // Modify View -> Should affect Original (Shared Storage)
+    view.data[0] = 999.0;
+    try std.testing.expectEqual(@as(f32, 999.0), t.at(&[_]usize{ 1, 0 }));
+}

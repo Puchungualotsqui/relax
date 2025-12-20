@@ -18,7 +18,7 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
     }
 
     const inner_len = dest.shape[d_ndim - 1];
-    const outer_elements = dest.storage.data.len / inner_len;
+    const outer_elements = dest.data.len / inner_len;
 
     const src_inner_is_broadcast = if (s_ndim > 0) src.shape[s_ndim - 1] == 1 else true;
     const can_simd_inner = !src_inner_is_broadcast and
@@ -31,8 +31,8 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
 
     for (0..outer_elements) |block_idx| {
         if (can_simd_inner) {
-            const d_ptr = dest.storage.data[curr_dest_base..][0..inner_len];
-            const s_ptr = src.storage.data[curr_src_base..][0..inner_len];
+            const d_ptr = dest.data[curr_dest_base..][0..inner_len];
+            const s_ptr = src.data[curr_src_base..][0..inner_len];
 
             for (d_ptr, s_ptr) |*d, s| {
                 op_scalar(d, s);
@@ -44,8 +44,8 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
 
             for (0..inner_len) |k| {
                 op_scalar(
-                    &dest.storage.data[curr_dest_base + k * d_stride],
-                    src.storage.data[curr_src_base + k * s_stride],
+                    &dest.data[curr_dest_base + k * d_stride],
+                    src.data[curr_src_base + k * s_stride],
                 );
             }
         }
@@ -84,21 +84,21 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
 
 /// Performs element-wise addition: self = self + other
 pub fn add(self: anytype, other: anytype) TensorError!void {
-    const T = @TypeOf(self.storage.data[0]);
-    if (self.storage.data.len != other.storage.data.len) return error.IncompatibleShapes;
+    const T = @TypeOf(self.data[0]);
+    if (self.data.len != other.data.len) return error.IncompatibleShapes;
 
     const simd_len = std.simd.suggestVectorLength(T) orelse 8;
     const Vec = @Vector(simd_len, T);
 
     var i: usize = 0;
-    while (i + simd_len <= self.storage.data.len) : (i += simd_len) {
-        const v1: Vec = self.storage.data[i..][0..simd_len].*;
-        const v2: Vec = other.storage.data[i..][0..simd_len].*;
-        self.storage.data[i..][0..simd_len].* = v1 + v2;
+    while (i + simd_len <= self.data.len) : (i += simd_len) {
+        const v1: Vec = self.data[i..][0..simd_len].*;
+        const v2: Vec = other.data[i..][0..simd_len].*;
+        self.data[i..][0..simd_len].* = v1 + v2;
     }
 
-    while (i < self.storage.data.len) : (i += 1) {
-        self.storage.data[i] += other.storage.data[i];
+    while (i < self.data.len) : (i += 1) {
+        self.data[i] += other.data[i];
     }
 }
 
@@ -109,12 +109,12 @@ pub fn reduce(dest: anytype, src: anytype, axis: usize, comptime init_val: anyty
     // OPTIMIZATION: If we are reducing the last dimension and it's contiguous
     if (axis == s_ndim - 1 and src.strides[s_ndim - 1] == 1) {
         const inner_len = src.shape[s_ndim - 1];
-        const outer_elements = src.storage.data.len / inner_len;
+        const outer_elements = src.data.len / inner_len;
 
         for (0..outer_elements) |i| {
-            const src_row = src.storage.data[i * inner_len ..][0..inner_len];
+            const src_row = src.data[i * inner_len ..][0..inner_len];
             // The destination for a last-axis reduction maps 1-to-1 with the outer loop index
-            const d_ptr = &dest.storage.data[i];
+            const d_ptr = &dest.data[i];
 
             for (src_row) |val| {
                 op_scalar(d_ptr, val);
@@ -128,8 +128,8 @@ pub fn reduce(dest: anytype, src: anytype, axis: usize, comptime init_val: anyty
     var curr_src_offset: usize = 0;
     var curr_dest_offset: usize = 0;
 
-    for (0..src.storage.data.len) |_| {
-        op_scalar(&dest.storage.data[curr_dest_offset], src.storage.data[curr_src_offset]);
+    for (0..src.data.len) |_| {
+        op_scalar(&dest.data[curr_dest_offset], src.data[curr_src_offset]);
 
         var j = s_ndim;
         while (j > 0) {
@@ -201,8 +201,8 @@ pub fn concat(dest: anytype, inputs: anytype, axis: usize) !void {
             // In a pro library, we'd cloned here or used a strided copy
             if (!src.isContiguous()) return error.NotContiguous;
 
-            const src_slice = src.storage.data[src_cursors[i]..][0..block_size];
-            const dest_slice = dest.storage.data[dest_offset..][0..block_size];
+            const src_slice = src.data[src_cursors[i]..][0..block_size];
+            const dest_slice = dest.data[dest_offset..][0..block_size];
 
             @memcpy(dest_slice, src_slice);
 
