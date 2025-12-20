@@ -103,7 +103,9 @@ pub fn Tensor(comptime T: type) type {
 
             // A simple copy is just a broadcastOp where the 'op' is assignment
             const closure = struct {
-                fn apply(d: *T, s: T) void { d.* = s; }
+                fn apply(d: *T, s: T) void {
+                    d.* = s;
+                }
             }.apply;
 
             // Use our new logic
@@ -176,10 +178,12 @@ pub fn Tensor(comptime T: type) type {
 
             // 2. Otherwise, use Broadcasting path (Slower but flexible)
             const closures = struct {
-                fn add(d: *T, s: T) void { d.* += s; }
+                fn add(d: *T, s: T) void {
+                    d.* += s;
+                }
             };
 
-            ops.broadcastOp(self, other, closures.add);
+            try ops.broadcastOp(self, other, closures.add);
         }
     };
 }

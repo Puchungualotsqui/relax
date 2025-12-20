@@ -68,3 +68,20 @@ test "reshape in-place" {
     try std.testing.expectEqual(@as(usize, 2), t.shape[1]);
     try std.testing.expectEqual(@as(f32, 3.0), t.at(&[_]usize{ 1, 0 }));
 }
+
+test "broadcasting different ranks" {
+    const allocator = std.testing.allocator;
+
+    // 2x2 Matrix
+    var mat = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 1, 1, 1 });
+    defer mat.deinit();
+
+    // 1D Vector [10] -> Should act like [10, 10] (broadcasted) or adding 10 to everything
+    var vec = try Tensor(f32).fromSlice(allocator, &[_]usize{1}, &[_]f32{10});
+    defer vec.deinit();
+
+    try mat.add(vec);
+
+    try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 1, 1 }));
+}
