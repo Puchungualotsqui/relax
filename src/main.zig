@@ -85,3 +85,32 @@ test "broadcasting different ranks" {
     try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 0, 0 }));
     try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 1, 1 }));
 }
+
+test "batched matrix multiplication" {
+    const allocator = std.testing.allocator;
+
+    // Shape [2, 2, 2] -> 2 matrices of 2x2
+    const shape = &[_]usize{ 2, 2, 2 };
+    var a = try Tensor(f32).fromSlice(allocator, shape, &[_]f32{
+        1, 0, 0, 1, // Matrix 0 (Identity)
+        2, 0, 0, 2, // Matrix 1 (2 * Identity)
+    });
+    defer a.deinit();
+
+    var b = try Tensor(f32).fromSlice(allocator, shape, &[_]f32{
+        4, 5, 6, 7, // Matrix 0
+        1, 1, 1, 1, // Matrix 1
+    });
+    defer b.deinit();
+
+    var res = try Tensor(f32).init(allocator, shape);
+    defer res.deinit();
+    res.fill(0);
+
+    try a.matmul(b, &res);
+
+    // Batch 0: Identity * [4,5,6,7] = [4,5,6,7]
+    try std.testing.expectEqual(@as(f32, 4.0), res.at(&[_]usize{ 0, 0, 0 }));
+    // Batch 1: 2*Identity * [1,1,1,1] = [2,2,2,2]
+    try std.testing.expectEqual(@as(f32, 2.0), res.at(&[_]usize{ 1, 1, 1 }));
+}

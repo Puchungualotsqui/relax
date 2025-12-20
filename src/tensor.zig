@@ -1,6 +1,7 @@
 const std = @import("std");
 const TensorError = @import("errors.zig").TensorError;
 const ops = @import("ops/elementwise.zig");
+const linalg = @import("ops/linalg.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn Tensor(comptime T: type) type {
@@ -184,6 +185,10 @@ pub fn Tensor(comptime T: type) type {
             };
 
             try ops.broadcastOp(self, other, closures.add);
+        }
+
+        pub fn matmul(self: Self, other: Self, dest: *Self) !void {
+            return linalg.matmul(dest, self, other);
         }
     };
 }
