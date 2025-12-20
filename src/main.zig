@@ -133,3 +133,24 @@ test "tensor sum reduction" {
     try std.testing.expectEqual(@as(f32, 7.0), res.at(&[_]usize{1}));
     try std.testing.expectEqual(@as(f32, 9.0), res.at(&[_]usize{2}));
 }
+
+test "tensor concatenation" {
+    const allocator = std.testing.allocator;
+
+    // t1: [1, 2]
+    var t1 = try Tensor(f32).fromSlice(allocator, &[_]usize{ 1, 2 }, &[_]f32{ 1, 2 });
+    defer t1.deinit();
+
+    // t2: [3, 4]
+    var t2 = try Tensor(f32).fromSlice(allocator, &[_]usize{ 1, 2 }, &[_]f32{ 3, 4 });
+    defer t2.deinit();
+
+    const inputs = &[_]Tensor(f32){ t1, t2 };
+
+    // Concatenate along axis 0 -> Result shape [2, 2]: [[1, 2], [3, 4]]
+    var res = try Tensor(f32).concatenate(allocator, inputs, 0);
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(f32, 1.0), res.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 3.0), res.at(&[_]usize{ 1, 0 }));
+}

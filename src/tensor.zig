@@ -180,6 +180,28 @@ pub fn Tensor(comptime T: type) type {
             @memset(self.storage.data, value);
         }
 
+        pub fn concatenate(allocator: std.mem.Allocator, tensors: []const Self, axis: usize) !Self {
+            if (tensors.len == 0) return error.EmptyInput;
+            const ndim = tensors[0].shape.len;
+
+            var new_shape = try allocator.alloc(usize, ndim);
+            defer allocator.free(new_shape);
+            @memcpy(new_shape, tensors[0].shape);
+
+            var concat_dim_size: usize = 0;
+            for (tensors) |t| {
+                if (t.shape.len != ndim) return error.IncompatibleShapes;
+                concat_dim_size += t.shape[axis];
+            }
+            new_shape[axis] = concat_dim_size;
+
+            var dest = try Self.init(allocator, new_shape);
+
+            try ops.concat(&dest, tensors, axis);
+
+            return dest;
+        }
+
         pub fn add(self: *Self, other: Self) TensorError!void {
             // 1. Check if shapes are exactly the same for SIMD path
             if (std.mem.eql(usize, self.shape, other.shape) and self.isContiguous() and other.isContiguous()) {
