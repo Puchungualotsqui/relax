@@ -111,10 +111,14 @@ pub fn Sequential(comptime T: type) type {
         // Keras-like High Level API
         // ============================================================
 
+        fn ce_wrapper(a: Allocator, p: VarT, t: VarT) anyerror!VarT {
+            return ops.cross_entropy_loss(a, p, t);
+        }
+
         pub const CompileConfig = struct {
             optimizer: enum { sgd, adam },
             lr: T = 0.01,
-            loss: enum { mse },
+            loss: enum { mse, cross_entropy },
         };
 
         // Helper to concretize generic ops
@@ -143,6 +147,7 @@ pub fn Sequential(comptime T: type) type {
 
             switch (config.loss) {
                 .mse => self.loss_fn = mse_wrapper,
+                .cross_entropy => self.loss_fn = ce_wrapper,
             }
         }
 

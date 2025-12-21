@@ -73,22 +73,10 @@ pub fn Dense(comptime T: type) type {
             var mm = try autograd_ops.matmul(self.allocator, input, self.weights);
             defer mm.deinit();
 
-            var out = try autograd_ops.add(self.allocator, mm, self.bias);
+            var linear_out = try autograd_ops.add(self.allocator, mm, self.bias);
 
-            // 2. Activation part
-            switch (self.activation) {
-                .none => return out,
-                .relu => {
-                    defer out.deinit();
-                    return try autograd_ops.relu(self.allocator, out);
-                },
-                .sigmoid => {
-                    defer out.deinit(); // Free the linear output, return the activated one
-                    return try autograd_ops.sigmoid(self.allocator, out);
-                },
-                // Add Softmax/Tanh here in the future
-                else => return out,
-            }
+            defer linear_out.deinit();
+            return try self.activation.forward(self.allocator, linear_out);
         }
     };
 }

@@ -1,25 +1,34 @@
 const std = @import("std");
 const Tensor = @import("../tensor.zig").Tensor;
+const Variable = @import("../autograd/variable.zig").Variable;
+const ops = @import("../autograd/ops.zig");
 const base = @import("../ops/base.zig");
 const Allocator = std.mem.Allocator;
 
 /// The "Menu" of available activations for a specific type T.
 pub fn Activation(comptime T: type) type {
     return union(enum) {
+        none,
         relu,
         sigmoid,
-        softmax: usize, // Payload: the axis to apply softmax over
-        none, // Identity (linear)
-        custom: *const fn (Allocator, Tensor(T)) anyerror!Tensor(T), // Escape hatch
+        softmax: usize, // Payload: axis
 
-        /// The "Dispatcher": Switches on the enum and calls the right kernel
-        pub fn forward(self: @This(), allocator: Allocator, input: Tensor(T)) !Tensor(T) {
+        const Self = @This();
+        // 2. Define VarT alias
+        const VarT = Variable(T);
+
+        // 3. Update Signature: input: VarT, return: VarT
+        pub fn forward(self: Self, allocator: Allocator, input: VarT) !VarT {
             switch (self) {
-                .relu => return relu(allocator, input),
-                .sigmoid => return sigmoid(allocator, input),
-                .softmax => |axis| return softmax(allocator, input, axis),
-                .none => return input.clone(), // Or just return input if we handle ownership carefully
-                .custom => |func| return func(allocator, input),
+                // For .none, we clone the variable reference (cheap) to keep ownership consistent
+                .none => return input.clone(),
+
+                // Delegate to autograd ops
+                .relu => return ops.relu(allocator, input),
+                .sigmoid => return ops.sigmoid(allocator, input),
+
+                // ops.softmax currently ignores axis, but we accept it for future proofing
+                .softmax => |_| return ops.softmax(allocator, input),
             }
         }
     };

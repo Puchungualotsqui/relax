@@ -58,3 +58,73 @@ test "Keras-style API Integration with Validation and Early Stopping" {
     // The best model was restored automatically, so accuracy should be high
     try std.testing.expect(std.math.approxEqAbs(f32, val, 3.5, 0.5));
 }
+
+test "Classification: Softmax + CrossEntropy (Sum > 1.0)" {
+    var rng = initz.RandomSource.init(1234);
+
+    // 1. Build Model (2 inputs -> 8 hidden -> 2 classes)
+    var model = Sequential.init(allocator);
+    defer model.deinit();
+
+    try model.add(.{ .dense = try Dense.init(allocator, .{ .in_features = 2, .out_features = 8, .activation = .relu }, &rng) });
+    try model.add(.{ .dense = try Dense.init(allocator, .{ .in_features = 8, .out_features = 2, .activation = .{ .softmax = 1 } }, &rng) });
+
+    // 2. Compile
+    try model.compile(.{
+        .optimizer = .adam,
+        .lr = 0.05, // High LR for fast convergence on simple toy data
+        .loss = .cross_entropy,
+    });
+
+    // 3. Create Training Data
+    // Rule: Class 1 if (x1 + x2) > 1.0, else Class 0
+    // Inputs: (4, 2)
+    var x = try Tensor(f32).fromSlice(allocator, &[_]usize{ 4, 2 }, &[_]f32{
+        0.1, 0.2, // Sum=0.3 -> Class 0
+        0.8, 0.9, // Sum=1.7 -> Class 1
+        0.4, 0.4, // Sum=0.8 -> Class 0
+        0.9, 0.5, // Sum=1.4 -> Class 1
+    });
+    defer x.deinit();
+
+    // Targets: One-Hot Encoded (4, 2)
+    // Class 0 = [1, 0], Class 1 = [0, 1]
+    var y = try Tensor(f32).fromSlice(allocator, &[_]usize{ 4, 2 }, &[_]f32{
+        1.0, 0.0, // Class 0
+        0.0, 1.0, // Class 1
+        1.0, 0.0, // Class 0
+        0.0, 1.0, // Class 1
+    });
+    defer y.deinit();
+
+    // 4. Fit
+    try model.fit(x, y, .{
+        .epochs = 200, // Enough for Adam to solve this
+        .verbose = false, // Keep output clean
+    });
+
+    // 5. Predict / Verify
+    // Test Case 1: (0.2, 0.1) -> Sum 0.3 -> Expect Class 0 ~[1, 0]
+    var test_1 = try Tensor(f32).fromSlice(allocator, &[_]usize{ 1, 2 }, &[_]f32{ 0.2, 0.1 });
+    defer test_1.deinit();
+    var p1 = try model.predict(test_1);
+    defer p1.deinit();
+
+    std.debug.print("Pred (0.2, 0.1): Class 0={d:.3}, Class 1={d:.3}\n", .{ p1.data[0], p1.data[1] });
+
+    // Check that Class 0 probability is dominant
+    try std.testing.expect(p1.data[0] > 0.8);
+    try std.testing.expect(p1.data[1] < 0.2);
+
+    // Test Case 2: (0.9, 0.9) -> Sum 1.8 -> Expect Class 1 ~[0, 1]
+    var test_2 = try Tensor(f32).fromSlice(allocator, &[_]usize{ 1, 2 }, &[_]f32{ 0.9, 0.9 });
+    defer test_2.deinit();
+    var p2 = try model.predict(test_2);
+    defer p2.deinit();
+
+    std.debug.print("Pred (0.9, 0.9): Class 0={d:.3}, Class 1={d:.3}\n", .{ p2.data[0], p2.data[1] });
+
+    // Check that Class 1 probability is dominant
+    try std.testing.expect(p2.data[1] > 0.8);
+    try std.testing.expect(p2.data[0] < 0.2);
+}

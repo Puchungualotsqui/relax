@@ -603,3 +603,243 @@ pub fn dropout(allocator: Allocator, input: anytype, probability: anytype, rng: 
     out.ptr.creator = creator;
     return out;
 }
+
+// --- Softmax Operation ---
+pub fn SoftmaxBackward(comptime T: type) type {
+    return struct {
+        base: Function(T),
+        allocator: Allocator,
+        input: Variable(T),
+        // CHANGE 1: Store Tensor, not Variable, to break the cycle
+        output: Tensor(T),
+        output_grad: Tensor(T),
+
+        const Self = @This();
+        const TensorT = Tensor(T);
+
+        pub fn backward(ptr: *Function(T)) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            const grad = self.output_grad;
+
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
+                defer d_input.deinit();
+
+                // CHANGE 2: Access data directly from the stored Tensor
+                const y_data = self.output.data;
+                const g_data = grad.data;
+                const d_data = d_input.data;
+
+                const batch_size = self.input.ptr.data.shape[0];
+                const classes = self.input.ptr.data.shape[1];
+
+                var offset: usize = 0;
+                for (0..batch_size) |_| {
+                    var sum_yg: T = 0;
+                    for (0..classes) |c| {
+                        sum_yg += y_data[offset + c] * g_data[offset + c];
+                    }
+
+                    for (0..classes) |c| {
+                        const idx = offset + c;
+                        d_data[idx] = y_data[idx] * (g_data[idx] - sum_yg);
+                    }
+                    offset += classes;
+                }
+
+                const input_grad = try self.input.getGrad();
+                try input_grad.addInPlace(d_input);
+            }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
+        }
+
+        pub fn deinit(ptr: *Function(T)) void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            self.output_grad.deinit();
+            self.input.deinit();
+            self.output.deinit(); // Frees the Tensor ref
+            self.allocator.destroy(self);
+        }
+    };
+}
+
+pub fn softmax(allocator: Allocator, input: anytype) !@TypeOf(input) {
+    const T = @TypeOf(input.ptr.data.data[0]);
+    if (input.ptr.data.shape.len != 2) return error.SoftmaxOnlySupports2D;
+
+    const batch_size = input.ptr.data.shape[0];
+    const classes = input.ptr.data.shape[1];
+    const in_data = input.ptr.data.data;
+
+    const out_data = try Tensor(T).init(allocator, input.ptr.data.shape);
+    const y_data = out_data.data;
+
+    var offset: usize = 0;
+    for (0..batch_size) |_| {
+        var max_val = in_data[offset];
+        for (1..classes) |c| {
+            if (in_data[offset + c] > max_val) max_val = in_data[offset + c];
+        }
+
+        var sum_exp: T = 0;
+        for (0..classes) |c| {
+            const val = std.math.exp(in_data[offset + c] - max_val);
+            y_data[offset + c] = val;
+            sum_exp += val;
+        }
+
+        for (0..classes) |c| {
+            y_data[offset + c] /= sum_exp;
+        }
+        offset += classes;
+    }
+
+    const needs_grad = input.ptr.requires_grad;
+
+    // We construct the result Variable
+    var out = try Variable(T).init(allocator, out_data, needs_grad);
+
+    var creator: ?*Function(T) = null;
+    if (needs_grad) {
+        const op = try allocator.create(SoftmaxBackward(T));
+        var grad = try Tensor(T).init(allocator, out_data.shape);
+        grad.fill(0);
+
+        op.* = .{
+            .base = .{
+                .backward_fn = SoftmaxBackward(T).backward,
+                .collect_parents_fn = SoftmaxBackward(T).collectParents,
+                .get_grad_fn = SoftmaxBackward(T).getGrad,
+                .deinit_fn = SoftmaxBackward(T).deinit,
+            },
+            .allocator = allocator,
+            .input = input.clone(),
+            // CHANGE 3: Store clone of the Tensor, not the Variable
+            .output = try out.ptr.data.clone(),
+            .output_grad = grad,
+        };
+        creator = &op.base;
+    }
+
+    out.ptr.creator = creator;
+    return out;
+}
+
+// --- Categorical Cross Entropy Loss ---
+// Loss = - Sum(Target * log(Prediction))
+
+pub fn CrossEntropyBackward(comptime T: type) type {
+    return struct {
+        base: Function(T),
+        allocator: Allocator,
+        input: Variable(T), // Predictions (Probabilities)
+        target: Variable(T), // One-Hot Targets
+        output_grad: Tensor(T),
+
+        const Self = @This();
+        const TensorT = Tensor(T);
+
+        pub fn backward(ptr: *Function(T)) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            const grad_scale = self.output_grad.data[0];
+
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
+                defer d_input.deinit();
+
+                const pred = self.input.ptr.data.data;
+                const targ = self.target.ptr.data.data;
+                const N: T = @floatFromInt(self.input.ptr.data.shape[0]); // Batch size
+                const epsilon: T = 1e-7; // Avoid division by zero
+
+                // dL/dp = -t / p
+                // We also divide by Batch Size (N) for mean reduction
+                for (0..pred.len) |i| {
+                    const p = if (pred[i] < epsilon) epsilon else pred[i];
+                    d_input.data[i] = (-targ[i] / p) * (grad_scale / N);
+                }
+
+                const input_grad = try self.input.getGrad();
+                try input_grad.addInPlace(d_input);
+            }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
+            if (self.target.ptr.creator) |c| try list.append(allocator, c);
+        }
+
+        pub fn deinit(ptr: *Function(T)) void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            self.output_grad.deinit();
+            self.input.deinit();
+            self.target.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+}
+
+pub fn cross_entropy_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(input) {
+    const T = @TypeOf(input.ptr.data.data[0]);
+
+    // 1. Forward: -Sum(t * log(p)) / N
+    const pred = input.ptr.data.data;
+    const targ = target.ptr.data.data;
+    const epsilon: T = 1e-7;
+
+    var loss_sum: T = 0;
+    for (0..pred.len) |i| {
+        // Clamp p to epsilon to avoid log(0)
+        const p = if (pred[i] < epsilon) epsilon else pred[i];
+        loss_sum -= targ[i] * std.math.log(T, std.math.e, p);
+    }
+
+    const batch_size = input.ptr.data.shape[0];
+    const loss_val = loss_sum / @as(T, @floatFromInt(batch_size));
+
+    var data = try Tensor(T).init(allocator, &[_]usize{1});
+    data.data[0] = loss_val;
+
+    // 2. Build Graph
+    const needs_grad = input.ptr.requires_grad;
+    var creator: ?*Function(T) = null;
+
+    if (needs_grad) {
+        const op = try allocator.create(CrossEntropyBackward(T));
+        var grad = try Tensor(T).init(allocator, data.shape);
+        grad.fill(0);
+
+        op.* = .{
+            .base = .{
+                .backward_fn = CrossEntropyBackward(T).backward,
+                .collect_parents_fn = CrossEntropyBackward(T).collectParents,
+                .get_grad_fn = CrossEntropyBackward(T).getGrad,
+                .deinit_fn = CrossEntropyBackward(T).deinit,
+            },
+            .allocator = allocator,
+            .input = input.clone(),
+            .target = target.clone(),
+            .output_grad = grad,
+        };
+        creator = &op.base;
+    }
+
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
+    return out;
+}
