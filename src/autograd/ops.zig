@@ -482,3 +482,121 @@ pub fn mse_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(
     out.ptr.creator = creator;
     return out;
 }
+
+pub fn DropoutBackward(comptime T: type) type {
+    return struct {
+        base: Function(T),
+        allocator: Allocator,
+        input: Variable(T),
+        mask: Tensor(T), // We must save the mask to use it in backward pass!
+        scale: T, // 1 / (1 - p)
+        output_grad: Tensor(T),
+
+        const Self = @This();
+        const TensorT = Tensor(T);
+
+        pub fn backward(ptr: *Function(T)) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            const grad = self.output_grad;
+
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
+                defer d_input.deinit();
+
+                // dL/dx = dL/dy * mask * scale
+                const count = grad.data.len;
+                const mask_data = self.mask.data;
+                const grad_data = grad.data;
+                const d_data = d_input.data;
+                const s = self.scale;
+
+                for (0..count) |i| {
+                    d_data[i] = grad_data[i] * mask_data[i] * s;
+                }
+
+                const input_grad = try self.input.getGrad();
+                try input_grad.addInPlace(d_input);
+            }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
+        }
+
+        pub fn deinit(ptr: *Function(T)) void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            self.output_grad.deinit();
+            self.mask.deinit(); // Free the saved mask
+            self.input.deinit(); // Release reference to input
+            self.allocator.destroy(self);
+        }
+    };
+}
+
+/// The Builder
+/// rng: A pointer to std.rand.Random (e.g. &my_prng.random())
+pub fn dropout(allocator: Allocator, input: anytype, probability: anytype, rng: std.Random) !@TypeOf(input) {
+    const T = @TypeOf(input.ptr.data.data[0]);
+
+    // 1. Generate Mask
+    // Inverted Dropout: scale by 1/(1-p) during training so inference needs no math
+    const keep_prob = 1.0 - probability;
+    const scale = 1.0 / keep_prob;
+
+    var mask = try Tensor(T).init(allocator, input.ptr.data.shape);
+    const mask_data = mask.data;
+
+    // Fill mask with Bernoulli(1-p)
+    // We iterate manually to fill the mask
+    for (0..mask_data.len) |i| {
+        mask_data[i] = if (rng.float(T) < keep_prob) 1.0 else 0.0;
+    }
+
+    // 2. Forward: Output = Input * Mask * Scale
+    const out_data = try Tensor(T).init(allocator, input.ptr.data.shape);
+    const input_data = input.ptr.data.data;
+    const out_slice = out_data.data;
+
+    for (0..out_slice.len) |i| {
+        out_slice[i] = input_data[i] * mask_data[i] * scale;
+    }
+
+    // 3. Build Graph
+    const needs_grad = input.ptr.requires_grad;
+    var creator: ?*Function(T) = null;
+
+    if (needs_grad) {
+        const op = try allocator.create(DropoutBackward(T));
+        var grad = try Tensor(T).init(allocator, out_data.shape);
+        grad.fill(0);
+
+        op.* = .{
+            .base = .{
+                .backward_fn = DropoutBackward(T).backward,
+                .collect_parents_fn = DropoutBackward(T).collectParents,
+                .get_grad_fn = DropoutBackward(T).getGrad,
+                .deinit_fn = DropoutBackward(T).deinit,
+            },
+            .allocator = allocator,
+            .input = input.clone(),
+            .mask = mask, // Hand over ownership of mask to Node
+            .scale = scale,
+            .output_grad = grad,
+        };
+        creator = &op.base;
+    } else {
+        // If no graph is built, the node won't exist to free the mask later,
+        // so we must free it now.
+        mask.deinit();
+    }
+
+    var out = try Variable(T).init(allocator, out_data, needs_grad);
+    out.ptr.creator = creator;
+    return out;
+}

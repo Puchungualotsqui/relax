@@ -66,7 +66,9 @@ pub fn Dense(comptime T: type) type {
         }
 
         /// Differentiable Forward Pass
-        pub fn forward(self: Self, input: VarT) !VarT {
+        pub fn forward(self: Self, input: VarT, is_training: bool) !VarT {
+            _ = is_training;
+
             // 1. Linear part
             var mm = try autograd_ops.matmul(self.allocator, input, self.weights);
             defer mm.deinit();

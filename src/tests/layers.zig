@@ -33,7 +33,7 @@ test "Dense layer usage (Clean API)" {
     defer input.deinit();
 
     // 4. Run Forward (Returns a Variable)
-    var output = try layer.forward(input);
+    var output = try layer.forward(input, true);
     defer output.deinit();
 
     // 5. Verify Output (Access data via ptr.data)
@@ -69,7 +69,7 @@ test "Sequential model end-to-end" {
     defer input.deinit();
 
     // 5. Forward Pass
-    var output = try model.forward(input);
+    var output = try model.forward(input, true);
     defer output.deinit();
 
     // 6. Verify Output
