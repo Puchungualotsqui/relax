@@ -1,6 +1,39 @@
 const std = @import("std");
 const base = @import("base.zig");
 
+/// Basic Sum reduction
+pub fn sum(dest: anytype, src: anytype, axis: usize) void {
+    const T = @TypeOf(src.data[0]);
+    const closures = struct {
+        fn add(acc: *T, val: T) void {
+            acc.* += val;
+        }
+    }.add;
+    base.reduce(dest, src, axis, @as(T, 0), closures);
+}
+
+/// Max reduction
+pub fn max(dest: anytype, src: anytype, axis: usize) void {
+    const T = @TypeOf(src.data[0]);
+    const closures = struct {
+        fn apply(acc: *T, val: T) void {
+            if (val > acc.*) acc.* = val;
+        }
+    }.apply;
+    base.reduce(dest, src, axis, std.math.floatMin(T), closures);
+}
+
+/// Min reduction
+pub fn min(dest: anytype, src: anytype, axis: usize) void {
+    const T = @TypeOf(src.data[0]);
+    const closures = struct {
+        fn apply(acc: *T, val: T) void {
+            if (val < acc.*) acc.* = val;
+        }
+    }.apply;
+    base.reduce(dest, src, axis, std.math.floatMax(T), closures);
+}
+
 pub fn mean(dest: anytype, src: anytype, axis: usize) void {
     const T = @TypeOf(src.data[0]);
     const closures = struct {

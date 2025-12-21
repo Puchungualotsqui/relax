@@ -47,3 +47,26 @@ pub fn concat(dest: anytype, inputs: anytype, axis: usize) !void {
         }
     }
 }
+
+/// Validates a permutation vector and returns error if invalid.
+/// Logic used by Tensor.permute
+pub fn validatePermutation(ndim: usize, dims: []const usize) !void {
+    if (dims.len != ndim) return error.InvalidRank;
+    var check = [_]bool{false} ** 16;
+    for (dims) |d| {
+        if (d >= ndim or check[d]) return error.InvalidPermutation;
+        check[d] = true;
+    }
+}
+
+/// Logic for flattening. If not contiguous, it returns an error
+/// to signal that a clone() is required first.
+pub fn flatten(dest_shape: []usize, dest_strides: []usize, src_shape: []const usize, is_contiguous: bool) !void {
+    if (!is_contiguous) return error.NotContiguous;
+
+    var total: usize = 1;
+    for (src_shape) |s| total *= s;
+
+    dest_shape[0] = total;
+    dest_strides[0] = 1;
+}

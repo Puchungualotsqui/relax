@@ -10,6 +10,24 @@ pub fn exp(dest: anytype, src: anytype) !void {
     try base.mapOp(dest, src, closures.apply);
 }
 
+pub fn log(dest: anytype, src: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void {
+            d.* = std.math.log(@TypeOf(s), s);
+        }
+    };
+    try base.mapOp(dest, src, closures.apply);
+}
+
+pub fn sqrt(dest: anytype, src: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void {
+            d.* = std.math.sqrt(s);
+        }
+    };
+    try base.mapOp(dest, src, closures.apply);
+}
+
 pub fn clip(dest: anytype, src: anytype, min_val: anytype, max_val: anytype) !void {
     const ndim = dest.shape.len;
 
@@ -139,10 +157,28 @@ pub fn addScalar(dest: anytype, src: anytype, val: anytype) void {
     scalarOp(dest, src, val, closures);
 }
 
+pub fn subScalar(dest: anytype, src: anytype, val: anytype) void {
+    const closures = struct {
+        fn apply(s: anytype, v: anytype) @TypeOf(s) {
+            return s - v;
+        }
+    }.apply;
+    scalarOp(dest, src, val, closures);
+}
+
 pub fn mulScalar(dest: anytype, src: anytype, val: anytype) void {
     const closures = struct {
         fn apply(s: anytype, v: anytype) @TypeOf(s) {
             return s * v;
+        }
+    }.apply;
+    scalarOp(dest, src, val, closures);
+}
+
+pub fn divScalar(dest: anytype, src: anytype, val: anytype) void {
+    const closures = struct {
+        fn apply(s: anytype, v: anytype) @TypeOf(s) {
+            return s / v;
         }
     }.apply;
     scalarOp(dest, src, val, closures);

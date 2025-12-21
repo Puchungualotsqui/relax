@@ -1,14 +1,90 @@
 const base = @import("base.zig");
 
-/// Performs element-wise addition: self = self + other
+// --- Arithmetic Operations ---
+
 pub fn add(self: anytype, other: anytype) !void {
     const closures = struct {
-        fn apply(d: *@TypeOf(self.data[0]), s: @TypeOf(self.data[0])) void {
+        fn apply(d: anytype, s: anytype) void {
             d.* += s;
         }
     };
-
     try base.broadcastOp(self, other, closures.apply);
+}
+
+pub fn sub(self: anytype, other: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void {
+            d.* -= s;
+        }
+    };
+    try base.broadcastOp(self, other, closures.apply);
+}
+
+pub fn mul(self: anytype, other: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void {
+            d.* *= s;
+        }
+    };
+    try base.broadcastOp(self, other, closures.apply);
+}
+
+pub fn div(self: anytype, other: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void {
+            d.* /= s;
+        }
+    };
+    try base.broadcastOp(self, other, closures.apply);
+}
+
+// --- Comparison Operations (Resulting in u8 mask) ---
+
+pub fn equal(dest: anytype, a: anytype, b: anytype) !void {
+    const closures = struct {
+        fn apply(d: *u8, v1: anytype, v2: anytype) void {
+            d.* = if (v1 == v2) 1 else 0;
+        }
+    };
+    try base.broadcastOp2(dest, a, b, closures.apply);
+}
+
+pub fn greaterThan(dest: anytype, a: anytype, b: anytype) !void {
+    const closures = struct {
+        fn apply(d: *u8, v1: anytype, v2: anytype) void {
+            d.* = if (v1 > v2) 1 else 0;
+        }
+    };
+    try base.broadcastOp2(dest, a, b, closures.apply);
+}
+
+pub fn lessThan(dest: anytype, a: anytype, b: anytype) !void {
+    const closures = struct {
+        fn apply(d: *u8, v1: anytype, v2: anytype) void {
+            d.* = if (v1 < v2) 1 else 0;
+        }
+    };
+    try base.broadcastOp2(dest, a, b, closures.apply);
+}
+
+// --- Logical Operations (For u8 mask combination) ---
+
+pub fn logicalAnd(dest: anytype, a: anytype, b: anytype) !void {
+    const closures = struct {
+        fn apply(d: *u8, v1: u8, v2: u8) void {
+            d.* = if (v1 != 0 and v2 != 0) 1 else 0;
+        }
+    };
+    try base.broadcastOp2(dest, a, b, closures.apply);
+}
+
+pub fn logicalOr(dest: anytype, a: anytype, b: anytype) !void {
+    const closures = struct {
+        fn apply(d: *u8, v1: u8, v2: u8) void {
+            d.* = if (v1 != 0 or v2 != 0) 1 else 0;
+        }
+    };
+    try base.broadcastOp2(dest, a, b, closures.apply);
 }
 
 pub fn where(dest: anytype, mask: anytype, src_a: anytype, src_b: anytype) !void {
