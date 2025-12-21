@@ -3,6 +3,7 @@ const allocator = std.testing.allocator;
 const VarF32 = @import("../autograd/variable.zig").Variable(f32);
 const TensorF32 = @import("../tensor.zig").Tensor(f32);
 const FuncF32 = @import("../autograd/function.zig").Function(f32);
+const ops = @import("../autograd/ops.zig");
 
 test "Autograd: Variable wrapper" {
     // 1. Create a raw tensor
@@ -80,4 +81,41 @@ test "Autograd: Graph Connection" {
 
     // 5. Verify
     try std.testing.expect(run_flag == true);
+}
+
+test "Autograd: Add Operation" {
+    // 1. Create Inputs (a=10, b=20)
+    const t_a = try TensorF32.fromSlice(allocator, &[_]usize{1}, &[_]f32{10.0});
+    var a = VarF32.init(allocator, t_a, true);
+    defer a.deinit();
+
+    const t_b = try TensorF32.fromSlice(allocator, &[_]usize{1}, &[_]f32{20.0});
+    var b = VarF32.init(allocator, t_b, true);
+    defer b.deinit();
+
+    // 2. Perform Operation (c = a + b)
+    var c = try ops.add(allocator, &a, &b);
+    defer c.deinit();
+
+    // Verify Forward
+    try std.testing.expectEqual(@as(f32, 30.0), c.data.at(&[_]usize{0}));
+    try std.testing.expect(c.creator != null); // It should have a creator
+
+    // 3. Trigger Backward manually
+    // We simulate the gradient coming from "loss" being 1.0
+    var grad_c = try TensorF32.fromSlice(allocator, &[_]usize{1}, &[_]f32{1.0});
+    defer grad_c.deinit();
+
+    if (c.creator) |op| {
+        try op.backward(grad_c);
+    }
+
+    // 4. Verify Gradients on Parents
+    // dL/da = 1.0 * 1.0 = 1.0
+    try std.testing.expect(a.grad != null);
+    try std.testing.expectEqual(@as(f32, 1.0), a.grad.?.at(&[_]usize{0}));
+
+    // dL/db = 1.0 * 1.0 = 1.0
+    try std.testing.expect(b.grad != null);
+    try std.testing.expectEqual(@as(f32, 1.0), b.grad.?.at(&[_]usize{0}));
 }
