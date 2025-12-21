@@ -851,7 +851,7 @@
 4304 4542828 1766317389195254579 f21e13e448b8490a46232d8a5a65a004 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/autograd.zig
 94 4536075 1766186815151044421 49acf197b584e4b154aab7542f8c507f 0 /mnt/storage/Documents/Projects/CS/Relax/src/errors.zig
 3130 4542827 1766317969526921647 4217fa1d90b46ad5b23348051908812f 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/variable.zig
-13064 4542880 1766318188647965813 397393ae282714d72f0611820122a4b7 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/ops.zig
+16829 4542880 1766318432362058583 09d7704bcaba2d0574af6d640b560e27 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/ops.zig
 2907 4542624 1766316458391214883 c7d775ff522aaaec8efc12115fd5456c 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/model.zig
 3461 4542796 1766313363217576183 a54ba0a959c604feb96aa3c08cdf71e4 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/loss.zig
 1095 4542851 1766317905302600167 2b89ac95456fe672d968c95686e55dbc 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/function.zig

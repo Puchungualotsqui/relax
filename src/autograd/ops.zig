@@ -377,3 +377,108 @@ pub fn sigmoid(allocator: Allocator, a: anytype) !@TypeOf(a) {
     out.ptr.creator = creator;
     return out;
 }
+
+pub fn MSEBackward(comptime T: type) type {
+    return struct {
+        base: Function(T),
+        allocator: Allocator,
+        input: Variable(T),
+        target: Variable(T),
+        output_grad: Tensor(T),
+
+        const Self = @This();
+        const TensorT = Tensor(T);
+
+        pub fn backward(ptr: *Function(T)) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            // We usually ignore the incoming grad for Loss because it's 1.0,
+            // but for correctness/chaining, we should multiply by it if present.
+            // For a root loss node, self.output_grad is usually all 1s.
+            const grad_scale = self.output_grad.data[0];
+
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
+                defer d_input.deinit();
+
+                const pred = self.input.ptr.data.data;
+                const targ = self.target.ptr.data.data;
+                const N: T = @floatFromInt(pred.len);
+                const factor = (2.0 / N) * grad_scale;
+
+                // dL/dInput = (2/N) * (Input - Target)
+                for (0..pred.len) |i| {
+                    d_input.data[i] = factor * (pred[i] - targ[i]);
+                }
+
+                const input_grad = try self.input.getGrad();
+                try input_grad.addInPlace(d_input);
+            }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
+            // Targets usually don't have creators (they are data), but if they did:
+            if (self.target.ptr.creator) |c| try list.append(allocator, c);
+        }
+
+        pub fn deinit(ptr: *Function(T)) void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            self.output_grad.deinit();
+            self.input.deinit();
+            self.target.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+}
+
+pub fn mse_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(input) {
+    const T = @TypeOf(input.ptr.data.data[0]);
+
+    // 1. Forward Calculation: Mean((Input - Target)^2)
+    // We compute this into a 1x1 Tensor (Scalar)
+    var loss_val: T = 0.0;
+    const pred = input.ptr.data.data;
+    const targ = target.ptr.data.data;
+    for (0..pred.len) |i| {
+        const diff = pred[i] - targ[i];
+        loss_val += diff * diff;
+    }
+    loss_val /= @floatFromInt(pred.len);
+
+    var data = try Tensor(T).init(allocator, &[_]usize{1});
+    data.data[0] = loss_val;
+
+    // 2. Build Graph
+    const needs_grad = input.ptr.requires_grad; // Targets usually don't need grad
+    var creator: ?*Function(T) = null;
+
+    if (needs_grad) {
+        const op = try allocator.create(MSEBackward(T));
+        var grad = try Tensor(T).init(allocator, data.shape);
+        grad.fill(0);
+
+        op.* = .{
+            .base = .{
+                .backward_fn = MSEBackward(T).backward,
+                .collect_parents_fn = MSEBackward(T).collectParents,
+                .get_grad_fn = MSEBackward(T).getGrad,
+                .deinit_fn = MSEBackward(T).deinit,
+            },
+            .allocator = allocator,
+            .input = input.clone(),
+            .target = target.clone(),
+            .output_grad = grad,
+        };
+        creator = &op.base;
+    }
+
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
+    return out;
+}
