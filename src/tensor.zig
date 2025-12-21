@@ -7,10 +7,12 @@ const Allocator = std.mem.Allocator;
 pub fn Tensor(comptime T: type) type {
     return struct {
         const Self = @This();
+        const alignment_val = 64;
+        const tensor_alignment = std.mem.Alignment.fromByteUnits(alignment_val);
 
         // Move Storage inside the struct
         pub const Storage = struct {
-            data: []T,
+            data: []align(alignment_val) T,
             ref_count: usize,
             allocator: Allocator,
 
@@ -36,7 +38,7 @@ pub fn Tensor(comptime T: type) type {
             const storage = try allocator.create(Storage);
             errdefer allocator.destroy(storage);
 
-            const raw_data = try allocator.alloc(T, size);
+            const raw_data = try allocator.alignedAlloc(T, tensor_alignment, size);
             errdefer allocator.free(raw_data);
 
             storage.* = .{
@@ -268,38 +270,43 @@ pub fn Tensor(comptime T: type) type {
         pub fn argmax(self: Self, allocator: std.mem.Allocator, axis: usize) !Tensor(usize) {
             if (axis >= self.shape.len) return error.InvalidAxis;
 
+            // 1. New shape has one fewer dimension (the collapsed axis)
             var new_shape = try allocator.alloc(usize, self.shape.len - 1);
             defer allocator.free(new_shape);
-            var d_count: usize = 0;
+            var d: usize = 0;
             for (self.shape, 0..) |s, i| {
                 if (i == axis) continue;
-                new_shape[d_count] = s;
-                d_count += 1;
+                new_shape[d] = s;
+                d += 1;
             }
 
+            // 2. We return a Tensor of indices (usize)
             var dest = try Tensor(usize).init(allocator, new_shape);
+
+            // 3. We need a temporary tensor to track the values to compare against
             var max_vals = try Self.init(allocator, new_shape);
             defer max_vals.deinit();
             max_vals.fill(std.math.floatMin(T));
 
+            // 4. Use your rolling pointer logic to iterate
             const s_ndim = self.shape.len;
             var indices = [_]usize{0} ** 16;
             var src_offset: usize = 0;
 
             for (0..self.data.len) |_| {
-                // Calculate destination offset accurately
+                // Map current src to dest offset
                 var d_offset: usize = 0;
-                var current_d_dim: usize = 0;
+                var d_dim: usize = 0;
                 for (0..s_ndim) |dim| {
                     if (dim == axis) continue;
-                    d_offset += indices[dim] * dest.strides[current_d_dim];
-                    current_d_dim += 1;
+                    d_offset += indices[dim] * dest.strides[d_dim];
+                    d_dim += 1;
                 }
 
-                const val = self.data[src_offset];
-                if (val > max_vals.data[d_offset]) {
-                    max_vals.data[d_offset] = val;
-                    dest.data[d_offset] = indices[axis];
+                const current_val = self.data[src_offset];
+                if (current_val > max_vals.data[d_offset]) {
+                    max_vals.data[d_offset] = current_val;
+                    dest.data[d_offset] = indices[axis]; // Save the index!
                 }
 
                 // Rolling index update
@@ -316,6 +323,34 @@ pub fn Tensor(comptime T: type) type {
                     }
                 }
             }
+
+            return dest;
+        }
+
+        pub fn max(self: Self, allocator: Allocator, axis: usize) !Self {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+
+            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
+            defer allocator.free(new_shape);
+            var d_idx: usize = 0;
+            for (self.shape, 0..) |s, i| {
+                if (i == axis) continue;
+                new_shape[d_idx] = s;
+                d_idx += 1;
+            }
+
+            var dest = try Self.init(allocator, new_shape);
+
+            // Initialize with smallest possible value for the type
+            dest.fill(std.math.floatMin(T));
+
+            const max_closure = struct {
+                fn apply(acc: *T, val: T) void {
+                    if (val > acc.*) acc.* = val;
+                }
+            }.apply;
+
+            ops.reduce(&dest, self, axis, std.math.floatMin(T), max_closure);
             return dest;
         }
 

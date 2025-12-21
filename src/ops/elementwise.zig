@@ -199,6 +199,60 @@ pub fn add(self: anytype, other: anytype) !void {
     try broadcastOp(self, other, closures.apply);
 }
 
+pub fn mapOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !void {
+    const ndim = dest.shape.len;
+    if (src.shape.len != ndim) return error.IncompatibleShapes;
+
+    const inner_len = dest.shape[ndim - 1];
+    const outer_elements = dest.data.len / inner_len;
+
+    // SIMD only if both are contiguous in the last dimension
+    const can_simd = (src.strides[ndim - 1] == 1) and (dest.strides[ndim - 1] == 1);
+
+    var indices = [_]usize{0} ** 16;
+    var cur_src: usize = 0;
+    var cur_dest: usize = 0;
+
+    for (0..outer_elements) |block_idx| {
+        if (can_simd) {
+            const d_ptr = dest.data[cur_dest..][0..inner_len];
+            const s_ptr = src.data[cur_src..][0..inner_len];
+            for (d_ptr, s_ptr) |*d, s| op_scalar(d, s);
+        } else {
+            const s_s = src.strides[ndim - 1];
+            const d_s = dest.strides[ndim - 1];
+            for (0..inner_len) |k| {
+                op_scalar(&dest.data[cur_dest + k * d_s], src.data[cur_src + k * s_s]);
+            }
+        }
+
+        // Rolling Index Update (Unary version)
+        if (ndim > 1 and block_idx < outer_elements - 1) {
+            var j = ndim - 1;
+            while (j > 0) {
+                j -= 1;
+                indices[j] += 1;
+                if (indices[j] < dest.shape[j]) {
+                    cur_dest += dest.strides[j];
+                    cur_src += src.strides[j];
+                    break;
+                } else {
+                    indices[j] = 0;
+                    cur_dest -= (dest.shape[j] - 1) * dest.strides[j];
+                    cur_src -= (src.shape[j] - 1) * src.strides[j];
+                }
+            }
+        }
+    }
+}
+
+pub fn exp(dest: anytype, src: anytype) !void {
+    const closures = struct {
+        fn apply(d: anytype, s: anytype) void { d.* = std.math.exp(s); }
+    };
+    try mapOp(dest, src, closures.apply);
+}
+
 pub fn reduce(dest: anytype, src: anytype, axis: usize, comptime init_val: anytype, comptime op_scalar: anytype) void {
     const s_ndim = src.shape.len;
     dest.fill(init_val);
