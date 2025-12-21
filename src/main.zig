@@ -223,3 +223,97 @@ test "argmax reduction" {
     try std.testing.expectEqual(@as(usize, 1), indices.at(&[_]usize{0}));
     try std.testing.expectEqual(@as(usize, 2), indices.at(&[_]usize{1}));
 }
+
+test "mean and variance" {
+    const allocator = std.testing.allocator;
+
+    // 1D Tensor [1, 2, 3, 4, 5, 6] -> Mean 3.5
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{6}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer t.deinit();
+
+    const mu = try t.mean(allocator, 0);
+    defer mu.deinit();
+    try std.testing.expectEqual(@as(f32, 3.5), mu.data[0]);
+
+    const res = try t.var_std(allocator, 0);
+    defer res.v.deinit();
+    defer res.s.deinit();
+
+    // Variance of 1..6 is ~2.9167
+    try std.testing.expect(std.math.approxEqAbs(f32, 2.9167, res.v.data[0], 0.001));
+}
+
+test "tensor where selection (method API)" {
+    const allocator = std.testing.allocator;
+
+    // 1. Setup Mask [1, 0, 1, 0]
+    var mask = try Tensor(u8).fromSlice(allocator, &[_]usize{4}, &[_]u8{ 1, 0, 1, 0 });
+    defer mask.deinit();
+
+    // 2. Setup A and B
+    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{4}, &[_]f32{ 10, 10, 10, 10 });
+    defer a.deinit();
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{4}, &[_]f32{ 20, 20, 20, 20 });
+    defer b.deinit();
+
+    // 3. Use the method API: mask.select(a, b, allocator)
+    // This internally calls ops.where and handles allocation
+    var res = try mask.select(a, b, allocator);
+    defer res.deinit();
+
+    // Expected: [10, 20, 10, 20]
+    try std.testing.expectEqual(@as(f32, 10.0), res.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(f32, 20.0), res.at(&[_]usize{1}));
+    try std.testing.expectEqual(@as(f32, 10.0), res.at(&[_]usize{2}));
+    try std.testing.expectEqual(@as(f32, 20.0), res.at(&[_]usize{3}));
+}
+
+test "where with broadcasting (method API)" {
+    const allocator = std.testing.allocator;
+
+    // Mask (2, 2)
+    var mask = try Tensor(u8).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]u8{ 1, 0, 0, 1 });
+    defer mask.deinit();
+
+    // A is a scalar-like (1,) [99]
+    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{1}, &[_]f32{99.0});
+    defer a.deinit();
+
+    // B is a matching (2, 2) [1, 2, 3, 4]
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 2, 3, 4 });
+    defer b.deinit();
+
+    // Use the method API
+    var res = try mask.select(a, b, allocator);
+    defer res.deinit();
+
+    // Expected: [[99, 2], [3, 99]]
+    try std.testing.expectEqual(@as(f32, 99.0), res.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 2.0), res.at(&[_]usize{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 3.0), res.at(&[_]usize{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 99.0), res.at(&[_]usize{ 1, 1 }));
+}
+
+test "tensor clipping (method API)" {
+    const allocator = std.testing.allocator;
+
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{4}, &[_]f32{ -10.0, 0.5, 10.0, 2.0 });
+    defer t.deinit();
+
+    // Test In-place clip
+    try t.clipInPlace(0.0, 1.0);
+
+    try std.testing.expectEqual(@as(f32, 0.0), t.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(f32, 0.5), t.at(&[_]usize{1}));
+    try std.testing.expectEqual(@as(f32, 1.0), t.at(&[_]usize{2}));
+
+    // Test Allocating clip
+    var t2 = try Tensor(f32).fromSlice(allocator, &[_]usize{2}, &[_]f32{ -5.0, 5.0 });
+    defer t2.deinit();
+
+    var res = try t2.clipped(allocator, -1.0, 1.0);
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(f32, -1.0), res.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(f32, 1.0), res.at(&[_]usize{1}));
+}

@@ -354,6 +354,38 @@ pub fn Tensor(comptime T: type) type {
             return dest;
         }
 
+        pub fn mean(self: Self, allocator: Allocator, axis: usize) !Self {
+            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
+            defer allocator.free(new_shape);
+            var d: usize = 0;
+            for (self.shape, 0..) |s, i| {
+                if (i == axis) continue;
+                new_shape[d] = s;
+                d += 1;
+            }
+
+            var dest = try Self.init(allocator, new_shape);
+            ops.mean(&dest, self, axis);
+            return dest;
+        }
+
+        pub fn var_std(self: Self, allocator: Allocator, axis: usize) !struct { v: Self, s: Self } {
+            const mu = try self.mean(allocator, axis);
+            defer mu.deinit();
+
+            var v_res = try Self.init(allocator, mu.shape);
+            ops.variance(&v_res, self, mu, axis);
+
+            // Standard Deviation is just sqrt(variance)
+            var s_res = try Self.init(allocator, mu.shape);
+            const sqrt_op = struct {
+                fn apply(d: *T, s: T) void { d.* = std.math.sqrt(s); }
+            }.apply;
+            try ops.mapOp(&s_res, v_res, sqrt_op);
+
+            return .{ .v = v_res, .s = s_res };
+        }
+
         pub fn add(self: Self, other: Self, allocator: Allocator) !Self {
             const out_shape = try ops.calculateBroadcastShape(allocator, self.shape, other.shape);
             defer allocator.free(out_shape);
@@ -375,6 +407,17 @@ pub fn Tensor(comptime T: type) type {
             };
             // broadcastOp already validates if 'other' can fit into 'self'
             try ops.broadcastOp(self, other, closures.apply);
+        }
+
+        pub fn addScalar(self: *Self, value: T) !void {
+            // Create a temporary 0D tensor view of the scalar
+            var scalar_val = value;
+            const scalar_tensor = .{
+                .data = @as([*]T, @ptrCast(&scalar_val))[0..1],
+                .shape = &[_]usize{},
+                .strides = &[_]usize{},
+            };
+            try self.addInPlace(scalar_tensor);
         }
 
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
@@ -424,6 +467,38 @@ pub fn Tensor(comptime T: type) type {
                 }
             };
             try ops.broadcastOp2(dest, a, b, closures.apply);
+        }
+
+        pub fn where(allocator: Allocator, mask: Tensor(u8), a: Self, b: Self) !Self {
+            // 1. Determine the result shape (mask, a, and b must be broadcast-compatible)
+            // For now, we assume they follow the shape of the mask.
+            var dest = try Self.init(allocator, mask.shape);
+
+            // 2. Call the optimized operation
+            try ops.where(&dest, mask, a, b);
+
+            return dest;
+        }
+
+        /// Method style: mask.select(a, b)
+        pub fn select(self: anytype, a: anytype, b: anytype, allocator: Allocator) !@TypeOf(a) {
+            // Ensure we use 'Self' (which is Tensor(T)) to match the input types
+            var dest = try @TypeOf(a).init(allocator, self.shape);
+            try ops.where(&dest, self, a, b);
+            return dest;
+        }
+
+        /// Returns a new tensor clipped to [min, max]
+        pub fn clipped(self: Self, allocator: Allocator, min_val: T, max_val: T) !Self {
+            var dest = try Self.init(allocator, self.shape);
+            try ops.clip(&dest, self, min_val, max_val);
+            return dest;
+        }
+
+        /// Clips the current tensor in-place
+        pub fn clipInPlace(self: *Self, min_val: T, max_val: T) !void {
+            // Passing self.* dereferences the pointer to match 'anytype' in ops
+            try ops.clip(self, self.*, min_val, max_val);
         }
     };
 }
