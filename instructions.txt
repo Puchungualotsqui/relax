@@ -1,0 +1,4 @@
+How to add optimizers?
+- Create zig file in optim
+- Add the union in optimizers.zig
+- Implement it in model.zig in `pub const CompileConfig = struct` and in `pub fn compile`

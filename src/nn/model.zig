@@ -5,6 +5,7 @@ const Dense = @import("layers/dense.zig").Dense;
 const Dropout = @import("layers/dropout.zig").Dropout;
 const Optimizer = @import("../optim/optimizers.zig").Optimizer;
 const SGD = @import("../optim/sgd.zig").SGD;
+const Adam = @import("../optim/adam.zig").Adam;
 const ops = @import("../autograd/ops.zig");
 
 const Allocator = std.mem.Allocator;
@@ -111,7 +112,7 @@ pub fn Sequential(comptime T: type) type {
         // ============================================================
 
         pub const CompileConfig = struct {
-            optimizer: enum { sgd },
+            optimizer: enum { sgd, adam },
             lr: T = 0.01,
             loss: enum { mse },
         };
@@ -133,6 +134,10 @@ pub fn Sequential(comptime T: type) type {
             switch (config.optimizer) {
                 .sgd => {
                     self.optimizer = .{ .sgd = SGD(T).init(self.allocator, params, config.lr) };
+                },
+                .adam => {
+                    // Adam init can fail (allocations), so we use try
+                    self.optimizer = .{ .adam = try Adam(T).init(self.allocator, params, config.lr) };
                 },
             }
 

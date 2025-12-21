@@ -19,7 +19,7 @@ test "Keras-style API Integration" {
 
     // 2. Compile
     try model.compile(.{
-        .optimizer = .sgd,
+        .optimizer = .adam,
         .lr = 0.02, // Slightly tuned LR
         .loss = .mse,
     });
