@@ -7,11 +7,11 @@ pub const InitializerError = error{
 
 /// Basic Wrapper for Zig's PRNG
 pub const RandomSource = struct {
-    prng: std.rand.DefaultPrng,
-    random: std.rand.Random,
+    prng: std.Random.DefaultPrng,
+    random: std.Random,
 
     pub fn init(seed: u64) RandomSource {
-        var prng = std.rand.DefaultPrng.init(seed);
+        var prng = std.Random.DefaultPrng.init(seed);
         return .{
             .prng = prng,
             .random = prng.random(),

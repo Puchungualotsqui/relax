@@ -1,5 +1,4 @@
 const std = @import("std");
-const TensorError = @import("errors.zig").TensorError;
 const linalg = @import("ops/linalg.zig");
 const base = @import("ops/base.zig");
 const metadata = @import("ops/metadata.zig");
@@ -7,6 +6,7 @@ const reductions = @import("ops/reductions.zig");
 const binary = @import("ops/binary.zig");
 const unary = @import("ops/unary.zig");
 const Allocator = std.mem.Allocator;
+const TensorError = @import("errors.zig").TensorError;
 
 pub fn Tensor(comptime T: type) type {
     return struct {
@@ -124,6 +124,20 @@ pub fn Tensor(comptime T: type) type {
             }.apply;
 
             try base.broadcastOp(dest, self, closure);
+        }
+
+        pub fn clone(self: Self) !Self {
+            var new_tensor = try Self.init(self.allocator, self.shape);
+
+            // If self is contiguous, we can use fast @memcpy
+            if (self.isContiguous()) {
+                const size = calculateSize(self.shape);
+                @memcpy(new_tensor.data, self.data[0..size]);
+            } else {
+                // Use our internal broadcasting copy for non-contiguous views
+                try self.copyTo(&new_tensor);
+            }
+            return new_tensor;
         }
 
         /// Returns the value at the specified multi-dimensional indices.

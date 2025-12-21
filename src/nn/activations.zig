@@ -1,15 +1,37 @@
 const std = @import("std");
 const Tensor = @import("../tensor.zig").Tensor;
 const base = @import("../ops/base.zig");
+const Allocator = std.mem.Allocator;
 
-/// ReLU: max(0, x)
-pub fn relu(allocator: std.mem.Allocator, x: anytype) !@TypeOf(x) {
-    // ReLU is essentially clipping the lower bound to 0
+/// The "Menu" of available activations for a specific type T.
+pub fn Activation(comptime T: type) type {
+    return union(enum) {
+        relu,
+        sigmoid,
+        softmax: usize, // Payload: the axis to apply softmax over
+        none, // Identity (linear)
+        custom: *const fn (Allocator, Tensor(T)) anyerror!Tensor(T), // Escape hatch
+
+        /// The "Dispatcher": Switches on the enum and calls the right kernel
+        pub fn forward(self: @This(), allocator: Allocator, input: Tensor(T)) !Tensor(T) {
+            switch (self) {
+                .relu => return relu(allocator, input),
+                .sigmoid => return sigmoid(allocator, input),
+                .softmax => |axis| return softmax(allocator, input, axis),
+                .none => return input.clone(), // Or just return input if we handle ownership carefully
+                .custom => |func| return func(allocator, input),
+            }
+        }
+    };
+}
+
+// --- Your existing kernels remain below ---
+
+pub fn relu(allocator: Allocator, x: anytype) !@TypeOf(x) {
     return try x.clipped(allocator, 0, std.math.inf(@TypeOf(x.data[0])));
 }
 
-/// Sigmoid: 1 / (1 + exp(-x))
-pub fn sigmoid(allocator: std.mem.Allocator, x: anytype) !@TypeOf(x) {
+pub fn sigmoid(allocator: Allocator, x: anytype) !@TypeOf(x) {
     const T = @TypeOf(x.data[0]);
     var out = try @TypeOf(x).init(allocator, x.shape);
     errdefer out.deinit();
@@ -24,42 +46,40 @@ pub fn sigmoid(allocator: std.mem.Allocator, x: anytype) !@TypeOf(x) {
     return out;
 }
 
-/// Stable Softmax: exp(x - max(x)) / sum(exp(x - max(x)))
-pub fn softmax(allocator: std.mem.Allocator, x: anytype, axis: usize) !@TypeOf(x) {
+pub fn softmax(allocator: Allocator, x: anytype, axis: usize) !@TypeOf(x) {
     const T = @TypeOf(x.data[0]);
 
-    // 1. LogSumExp is the "gold standard" for stable softmax denominators
-    // We calculate: exp(x - LSE(x))
-    const lse = try x.logSumExp(allocator, axis);
-    defer lse.deinit();
+    // 1. Calculate Max for stability (safe against overflow)
+    var max_vals = try x.max(allocator, axis);
+    defer max_vals.deinit();
 
-    var out = try @TypeOf(x).init(allocator, x.shape);
-    errdefer out.deinit();
+    // 2. Calculate Exp(x - max)
+    // We need to broadcast sub first, then exp.
+    // Optimization: We can fuse this. But for now, let's keep it composed.
+    var shifted = try Tensor(T).init(allocator, x.shape);
+    defer shifted.deinit();
 
-    const closure = struct {
-        fn apply(d: *T, s: T, l: T) void {
-            d.* = std.math.exp(s - l);
+    const sub_closure = struct {
+        fn apply(d: *T, s: T, m: T) void {
+            d.* = s - m;
         }
     }.apply;
+    try base.broadcastOp2(&shifted, x, max_vals, sub_closure);
+    try shifted.expInPlace(); // shifted is now exp(x-max)
 
-    // Use broadcastOp2 to subtract the LSE reduction from the original tensor
-    try base.broadcastOp2(&out, x, lse, closure);
-    return out;
-}
+    // 3. Calculate Sum of Exps
+    var sum_exps = try shifted.sum(allocator, axis);
+    defer sum_exps.deinit();
 
-/// User-Defined Custom Activation Helper
-/// Allows a user to pass any function f(x) -> x
-pub fn custom(allocator: std.mem.Allocator, x: anytype, comptime func: anytype) !@TypeOf(x) {
-    const T = @TypeOf(x.data[0]);
-    var out = try @TypeOf(x).init(allocator, x.shape);
-    errdefer out.deinit();
-
-    const wrapper = struct {
-        fn apply(d: *T, s: T) void {
-            d.* = func(s);
+    // 4. Divide: shifted / sum_exps
+    var out = try Tensor(T).init(allocator, x.shape);
+    // Reuse broadcastOp2 for division
+    const div_closure = struct {
+        fn apply(d: *T, n: T, den: T) void {
+            d.* = n / den;
         }
     }.apply;
+    try base.broadcastOp2(&out, shifted, sum_exps, div_closure);
 
-    try base.mapOp(&out, x, wrapper);
     return out;
 }
