@@ -150,3 +150,53 @@ test "Autograd: Full Backward Pass (c = a + b)" {
     const gb = try b.getGrad();
     try std.testing.expectEqual(@as(f32, 1.0), gb.at(&[_]usize{0}));
 }
+
+test "Autograd: MatMul Backward" {
+    // 1. Define Matrices
+    // A (2x3)
+    const t_a = try TensorF32.fromSlice(allocator, &[_]usize{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    var a = VarF32.init(allocator, t_a, true);
+    defer a.deinit();
+
+    // B (3x2)
+    const t_b = try TensorF32.fromSlice(allocator, &[_]usize{ 3, 2 }, &[_]f32{ 7, 8, 9, 10, 11, 12 });
+    var b = VarF32.init(allocator, t_b, true);
+    defer b.deinit();
+
+    // 2. Forward: C = A @ B
+    // Expected C (2x2):
+    // [1*7+2*9+3*11,  1*8+2*10+3*12] = [58, 64]
+    // [4*7+5*9+6*11,  4*8+5*10+6*12] = [139, 154]
+    var c = try ops.matmul(allocator, &a, &b);
+    defer c.deinit();
+
+    // Verify Forward
+    try std.testing.expectEqual(@as(f32, 58.0), c.data.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 154.0), c.data.at(&[_]usize{ 1, 1 }));
+
+    // 3. Backward
+    // We simulate a Loss = Sum(C).
+    // Therefore, dL/dC is a matrix of 1.0s.
+    // We need to set c.grad manually before calling backward,
+    // OR just call c.backward() which defaults to setting grad to 1.0 (perfect for scalar outputs,
+    // but for matrix outputs it implicitly treats it as sum reduction).
+
+    try c.backward();
+
+    // 4. Verify Gradients
+    // dL/dA = dL/dC @ B^T
+    //       = [[1, 1], [1, 1]] @ [[7, 9, 11], [8, 10, 12]]
+    //       = [[15, 19, 23], [15, 19, 23]]
+    const ga = try a.getGrad();
+    try std.testing.expectEqual(@as(f32, 15.0), ga.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 23.0), ga.at(&[_]usize{ 0, 2 }));
+    try std.testing.expectEqual(@as(f32, 15.0), ga.at(&[_]usize{ 1, 0 }));
+
+    // dL/dB = A^T @ dL/dC
+    //       = [[1, 4], [2, 5], [3, 6]] @ [[1, 1], [1, 1]]
+    //       = [[5, 5], [7, 7], [9, 9]]
+    const gb = try b.getGrad();
+    try std.testing.expectEqual(@as(f32, 5.0), gb.at(&[_]usize{ 0, 0 })); // Row 0
+    try std.testing.expectEqual(@as(f32, 7.0), gb.at(&[_]usize{ 1, 0 })); // Row 1
+    try std.testing.expectEqual(@as(f32, 9.0), gb.at(&[_]usize{ 2, 1 })); // Row 2, Col 1
+}
