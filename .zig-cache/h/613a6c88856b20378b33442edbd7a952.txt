@@ -847,5 +847,7 @@
 2858 4542618 1766312793036326579 72db840873ab375856f8524f24a7ea9a 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/activations.zig
 1892 4542623 1766312171943332464 586b43e417eb63981a0a2f963c94bc73 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/initializers.zig
 16713 4542648 1766311417391494430 cb36344320940056ca0b89a794fe5e78 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/tensor.zig
-960 4542649 1766312831980405775 d4eef8be21955156b9091cf6e7929d36 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/layers.zig
+3639 4542649 1766313394795649330 3424bb556c43625b9ffbd89730f83283 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/layers.zig
 94 4536075 1766186815151044421 49acf197b584e4b154aab7542f8c507f 0 /mnt/storage/Documents/Projects/CS/Relax/src/errors.zig
+2408 4542624 1766313229798270437 e3be818b6a121d103a7810c98f336bdd 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/model.zig
+3461 4542796 1766313363217576183 a54ba0a959c604feb96aa3c08cdf71e4 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/loss.zig
