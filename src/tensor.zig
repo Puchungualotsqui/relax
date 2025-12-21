@@ -140,6 +140,40 @@ pub fn Tensor(comptime T: type) type {
             return new_tensor;
         }
 
+        /// Creates a new tensor containing a slice of the original along the specified dimension.
+        pub fn sliceDimension(self: Self, dim: usize, start: usize, end: usize, allocator: std.mem.Allocator) !Self {
+            if (dim >= self.shape.len) return error.InvalidDimension;
+
+            // 1. Prepare New Shape
+            // We allocate a temporary shape buffer just to initialize the new tensor
+            const new_shape_temp = try allocator.alloc(usize, self.shape.len);
+            defer allocator.free(new_shape_temp); // Important: Free this temp buffer!
+
+            @memcpy(new_shape_temp, self.shape);
+            new_shape_temp[dim] = end - start;
+
+            // 2. Initialize Destination Tensor
+            // init() duplicates the shape we pass it, so new_shape_temp can be freed safely by defer.
+            var dest = try Self.init(allocator, new_shape_temp);
+
+            // 3. Calculate Offsets
+            const stride = self.strides[dim];
+            const slice_len = end - start;
+            const slice_size = slice_len * stride;
+            const offset = start * stride;
+
+            // Safety Check
+            if (offset + slice_size > self.data.len) {
+                dest.deinit();
+                return error.IndexOutOfBounds;
+            }
+
+            // 4. Copy Data Directly
+            @memcpy(dest.data, self.data[offset .. offset + slice_size]);
+
+            return dest;
+        }
+
         /// Returns the value at the specified multi-dimensional indices.
         pub fn at(self: Self, indices: []const usize) T {
             // Safety check: indices length should match rank

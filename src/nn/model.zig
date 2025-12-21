@@ -148,6 +148,7 @@ pub fn Sequential(comptime T: type) type {
 
         pub const FitConfig = struct {
             epochs: usize,
+            batch_size: usize = 32,
             val_data: ?struct { x: Tensor(T), y: Tensor(T) } = null,
             verbose: bool = true,
             patience: ?usize = null,
@@ -156,68 +157,81 @@ pub fn Sequential(comptime T: type) type {
         /// Trains the model for a fixed number of epochs.
         /// Takes raw Tensors (x, y), creates copies for the graph, and runs the loop.
         pub fn fit(self: *Self, x: Tensor(T), y: Tensor(T), config: FitConfig) !void {
-            if (self.optimizer == null or self.loss_fn == null) {
-                return error.ModelNotCompiled;
-            }
+            if (self.optimizer == null or self.loss_fn == null) return error.ModelNotCompiled;
 
+            const num_samples = x.shape[0];
             if (x.shape[0] != y.shape[0]) return error.BatchSizeMismatch;
 
-            // Wrap training data
-            var x_var = try VarT.init(self.allocator, try x.clone(), false);
-            defer x_var.deinit();
-            var y_var = try VarT.init(self.allocator, try y.clone(), false);
-            defer y_var.deinit();
-
-            // Wrap validation data if provided
             var val_vars: ?struct { x: VarT, y: VarT } = null;
             if (config.val_data) |vd| {
-                const vx = try VarT.init(self.allocator, try vd.x.clone(), false);
-                const vy = try VarT.init(self.allocator, try vd.y.clone(), false);
-                val_vars = .{ .x = vx, .y = vy };
+                val_vars = .{
+                    .x = try VarT.init(self.allocator, try vd.x.clone(), false),
+                    .y = try VarT.init(self.allocator, try vd.y.clone(), false),
+                };
             }
             defer if (val_vars) |vv| {
                 vv.x.deinit();
                 vv.y.deinit();
             };
 
-            // Use pointer capture for optimizer calls
-            var opt_ptr = &self.optimizer.?;
-
             const CheckpointT = @import("checkpoint.zig").Checkpoint(T);
             var best_checkpoint: ?CheckpointT = null;
             defer if (best_checkpoint) |*cp| cp.deinit();
 
             var best_val_loss = std.math.inf(T);
+            var patience_counter: usize = 0;
             const params = try self.parameters();
-            // We must manage this list since model.parameters() returns an unmanaged list
             defer {
                 for (params.items) |p| p.deinit();
                 var p_list = params;
                 p_list.deinit(self.allocator);
             }
 
-            var patience_counter: usize = 0;
+            var opt_ptr = &self.optimizer.?;
 
             std.debug.print("Training on {d} samples...\n", .{x.shape[0]});
 
             for (0..config.epochs) |epoch| {
-                // A. Zero Grad (Call on pointer)
-                try opt_ptr.zeroGrad();
+                var epoch_loss: T = 0;
+                var batch_count: usize = 0;
 
-                // ... (Forward, Loss, Backward) ...
-                var preds = try self.forward(x_var, true);
-                defer preds.deinit();
+                // --- MINI-BATCH LOOP ---
+                var start: usize = 0;
+                while (start < num_samples) : (start += config.batch_size) {
+                    const end = @min(start + config.batch_size, num_samples);
+                    // 1. Slice Raw Tensors
+                    const x_batch_t = try x.sliceDimension(0, start, end, self.allocator);
+                    const y_batch_t = try y.sliceDimension(0, start, end, self.allocator);
 
-                var loss = try self.loss_fn.?(self.allocator, preds, y_var);
-                defer loss.deinit();
+                    // 2. Wrap in Variables
+                    var x_batch = try VarT.init(self.allocator, x_batch_t, false);
+                    var y_batch = try VarT.init(self.allocator, y_batch_t, false);
+                    defer {
+                        x_batch.deinit();
+                        y_batch.deinit();
+                    }
 
-                try loss.backward();
-                try opt_ptr.step();
+                    // 3. Step
+                    try opt_ptr.zeroGrad();
+                    var preds = try self.forward(x_batch, true);
+                    defer preds.deinit();
+
+                    var loss_var = try self.loss_fn.?(self.allocator, preds, y_batch);
+                    defer loss_var.deinit();
+
+                    try loss_var.backward();
+                    try opt_ptr.step();
+
+                    epoch_loss += loss_var.ptr.data.data[0];
+                    batch_count += 1;
+                }
+
+                // Calculate Average Loss for the Epoch
+                const avg_train_loss = epoch_loss / @as(T, @floatFromInt(batch_count));
 
                 // --- VALIDATION STEP ---
                 var val_loss_val: ?T = null;
                 if (val_vars) |vv| {
-                    // Inference mode (is_training = false)
                     var v_preds = try self.forward(vv.x, false);
                     defer v_preds.deinit();
 
@@ -228,35 +242,32 @@ pub fn Sequential(comptime T: type) type {
                     if (val_loss_val.? < best_val_loss) {
                         best_val_loss = val_loss_val.?;
                         patience_counter = 0;
-
-                        // Clean old checkpoint
                         if (best_checkpoint) |*cp| cp.deinit();
-                        // Capture new best weights
                         best_checkpoint = try CheckpointT.capture(self.allocator, params);
                     } else {
                         patience_counter += 1;
                     }
-
-                    if (config.patience) |p| {
-                        if (patience_counter >= p) {
-                            if (config.verbose) std.debug.print("\nEarly stopping triggered at epoch {d}\n", .{epoch + 1});
-                            break;
-                        }
-                    }
                 }
 
                 // --- LOGGING ---
+                // Corrected: Uses avg_train_loss instead of 'loss'
                 if (config.verbose and (epoch % 10 == 0 or epoch == config.epochs - 1)) {
-                    const train_loss = loss.ptr.data.data[0];
                     if (val_loss_val) |vl| {
-                        std.debug.print("Epoch {d}/{d} - loss: {d:.4} - val_loss: {d:.4}\n", .{ epoch + 1, config.epochs, train_loss, vl });
+                        std.debug.print("Epoch {d}/{d} - loss: {d:.4} - val_loss: {d:.4}\n", .{ epoch + 1, config.epochs, avg_train_loss, vl });
                     } else {
-                        std.debug.print("Epoch {d}/{d} - loss: {d:.4}\n", .{ epoch + 1, config.epochs, train_loss });
+                        std.debug.print("Epoch {d}/{d} - loss: {d:.4}\n", .{ epoch + 1, config.epochs, avg_train_loss });
+                    }
+                }
+
+                // --- EARLY STOPPING CHECK ---
+                if (config.patience) |p| {
+                    if (patience_counter >= p) {
+                        if (config.verbose) std.debug.print("\nEarly stopping triggered at epoch {d}\n", .{epoch + 1});
+                        break;
                     }
                 }
             }
 
-            // After the loop, restore the best parameters found
             if (best_checkpoint) |cp| {
                 try cp.restore(params);
                 if (config.verbose) std.debug.print("Restored best model with val_loss: {d:.4}\n", .{best_val_loss});
