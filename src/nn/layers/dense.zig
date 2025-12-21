@@ -60,9 +60,9 @@ pub fn Dense(comptime T: type) type {
         }
 
         /// Returns references to the trainable parameters
-        pub fn parameters(self: Self, list: *std.ArrayList(VarT)) !void {
-            try list.append(self.weights.clone());
-            try list.append(self.bias.clone());
+        pub fn parameters(self: Self, allocator: Allocator, list: *std.ArrayListUnmanaged(VarT)) !void {
+            try list.append(allocator, self.weights.clone());
+            try list.append(allocator, self.bias.clone());
         }
 
         /// Differentiable Forward Pass

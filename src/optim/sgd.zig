@@ -1,5 +1,5 @@
 const std = @import("std");
-const Variable = @import("../../autograd/variable.zig").Variable;
+const Variable = @import("../autograd/variable.zig").Variable;
 const Allocator = std.mem.Allocator;
 
 pub fn SGD(comptime T: type) type {
@@ -7,14 +7,14 @@ pub fn SGD(comptime T: type) type {
         const Self = @This();
         const VarT = Variable(T);
 
-        params: std.ArrayList(VarT),
+        params: std.ArrayListUnmanaged(VarT),
         learning_rate: T,
         allocator: Allocator,
 
         /// Initialize Optimizer.
         /// 'params' is the list returned by model.parameters().
         /// The optimizer takes ownership of this list (it's a list of ref-counted variables).
-        pub fn init(allocator: Allocator, params: std.ArrayList(VarT), lr: T) Self {
+        pub fn init(allocator: Allocator, params: std.ArrayListUnmanaged(VarT), lr: T) Self {
             return Self{
                 .params = params,
                 .learning_rate = lr,
@@ -22,12 +22,12 @@ pub fn SGD(comptime T: type) type {
             };
         }
 
-        pub fn deinit(self: Self) void {
-            // release our references to the parameters
-            for (self.params.items) |p| {
+        pub fn deinit(mut_self: *Self) void {
+            // Release variable references
+            for (mut_self.params.items) |p| {
                 p.deinit();
             }
-            self.params.deinit();
+            mut_self.params.deinit(mut_self.allocator);
         }
 
         /// Clears gradients for all parameters.

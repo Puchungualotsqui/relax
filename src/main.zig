@@ -21,4 +21,6 @@ test {
     _ = @import("tests/layers.zig");
 
     _ = @import("tests/autograd.zig");
+
+    _ = @import("tests/keraslike.zig");
 }

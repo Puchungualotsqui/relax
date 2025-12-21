@@ -4,7 +4,7 @@ const Variable = @import("variable.zig").Variable;
 const Function = @import("function.zig").Function;
 const Allocator = std.mem.Allocator;
 
-// --- Addition Operation ---
+// --- Addition Operation (With Broadcasting for Bias) ---
 
 pub fn AddBackward(comptime T: type) type {
     return struct {
@@ -19,18 +19,49 @@ pub fn AddBackward(comptime T: type) type {
 
         pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            // We need a pointer to the gradient to pass to addInPlace if we wanted to be safe,
-            // but here we just read from self.output_grad.
-            // The issue in your code was likely in the BUILDER function, not here.
             const grad = self.output_grad;
 
+            // Helper to apply gradient, reducing if necessary (Rank 2 -> Rank 1)
+            const apply_grad = struct {
+                fn run(target_var: Variable(T), source_grad: Tensor(T)) !void {
+                    const target_grad = try target_var.getGrad();
+
+                    // Case 1: Exact Match
+                    if (std.mem.eql(usize, target_grad.shape, source_grad.shape)) {
+                        try target_grad.addInPlace(source_grad);
+                        return;
+                    }
+
+                    // Case 2: Bias Reduction (2D -> 1D)
+                    // Gradient is (Batch, Features), Target is (Features)
+                    if (source_grad.shape.len == 2 and target_grad.shape.len == 1) {
+                        if (source_grad.shape[1] != target_grad.shape[0]) return error.IncompatibleShapes;
+
+                        // Sum over batch dimension (axis 0)
+                        const batch_size = source_grad.shape[0];
+                        const features = source_grad.shape[1];
+                        const s_data = source_grad.data;
+                        const t_data = target_grad.data;
+
+                        var i: usize = 0;
+                        while (i < batch_size * features) {
+                            for (0..features) |f| {
+                                t_data[f] += s_data[i];
+                                i += 1;
+                            }
+                        }
+                        return;
+                    }
+
+                    return error.BroadcastBackwardNotImplemented;
+                }
+            }.run;
+
             if (self.input_a.ptr.requires_grad) {
-                const a_grad = try self.input_a.getGrad();
-                try a_grad.addInPlace(grad);
+                try apply_grad(self.input_a, grad);
             }
             if (self.input_b.ptr.requires_grad) {
-                const b_grad = try self.input_b.getGrad();
-                try b_grad.addInPlace(grad);
+                try apply_grad(self.input_b, grad);
             }
         }
 
@@ -41,7 +72,6 @@ pub fn AddBackward(comptime T: type) type {
 
         pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            // Append now requires allocator
             if (self.input_a.ptr.creator) |c| try list.append(allocator, c);
             if (self.input_b.ptr.creator) |c| try list.append(allocator, c);
         }
@@ -65,8 +95,6 @@ pub fn add(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
     var creator: ?*Function(T) = null;
     if (needs_grad) {
         const op = try allocator.create(AddBackward(T));
-
-        // FIX: strict var for mutation
         var grad = try Tensor(T).init(allocator, data.shape);
         grad.fill(0);
 
@@ -91,7 +119,7 @@ pub fn add(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
 }
 
 // --- Matrix Multiplication Operation ---
-
+// (Keep MatMulBackward and matmul exactly as they were in your previous code)
 pub fn MatMulBackward(comptime T: type) type {
     return struct {
         base: Function(T),
@@ -181,8 +209,6 @@ pub fn matmul(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
     var creator: ?*Function(T) = null;
     if (needs_grad) {
         const op = try allocator.create(MatMulBackward(T));
-
-        // FIX: strict var for mutation
         var grad = try Tensor(T).init(allocator, data.shape);
         grad.fill(0);
 
@@ -207,7 +233,7 @@ pub fn matmul(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
 }
 
 // --- ReLU Operation ---
-
+// (Keep ReLUBackward/relu as is)
 pub fn ReLUBackward(comptime T: type) type {
     return struct {
         base: Function(T),
@@ -262,8 +288,6 @@ pub fn relu(allocator: Allocator, a: anytype) !@TypeOf(a) {
     var creator: ?*Function(T) = null;
     if (needs_grad) {
         const op = try allocator.create(ReLUBackward(T));
-
-        // FIX: strict var for mutation
         var grad = try Tensor(T).init(allocator, data.shape);
         grad.fill(0);
 
@@ -287,7 +311,7 @@ pub fn relu(allocator: Allocator, a: anytype) !@TypeOf(a) {
 }
 
 // --- Sigmoid Operation ---
-
+// (Keep Sigmoid as is)
 pub fn SigmoidBackward(comptime T: type) type {
     return struct {
         base: Function(T),
@@ -310,8 +334,6 @@ pub fn SigmoidBackward(comptime T: type) type {
                 const g_data = grad.data;
                 const d_data = d_input.data;
 
-                // dL/dx = grad * sigmoid(x) * (1 - sigmoid(x))
-                // We recompute sigmoid(x) here to avoid storing the output variable (breaking cycles)
                 for (0..x_data.len) |i| {
                     const s = 1.0 / (1.0 + std.math.exp(-x_data[i]));
                     d_data[i] = g_data[i] * s * (1.0 - s);
@@ -344,14 +366,12 @@ pub fn SigmoidBackward(comptime T: type) type {
 pub fn sigmoid(allocator: Allocator, a: anytype) !@TypeOf(a) {
     const T = @TypeOf(a.ptr.data.data[0]);
 
-    // 1. Forward
     var data = try Tensor(T).init(allocator, a.ptr.data.shape);
     const in_data = a.ptr.data.data;
     for (0..in_data.len) |i| {
         data.data[i] = 1.0 / (1.0 + std.math.exp(-in_data[i]));
     }
 
-    // 2. Build Graph
     const needs_grad = a.ptr.requires_grad;
     var creator: ?*Function(T) = null;
     if (needs_grad) {
@@ -378,6 +398,8 @@ pub fn sigmoid(allocator: Allocator, a: anytype) !@TypeOf(a) {
     return out;
 }
 
+// --- MSE Operation ---
+// (Keep MSE as is)
 pub fn MSEBackward(comptime T: type) type {
     return struct {
         base: Function(T),
@@ -391,9 +413,6 @@ pub fn MSEBackward(comptime T: type) type {
 
         pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            // We usually ignore the incoming grad for Loss because it's 1.0,
-            // but for correctness/chaining, we should multiply by it if present.
-            // For a root loss node, self.output_grad is usually all 1s.
             const grad_scale = self.output_grad.data[0];
 
             if (self.input.ptr.requires_grad) {
@@ -405,7 +424,6 @@ pub fn MSEBackward(comptime T: type) type {
                 const N: T = @floatFromInt(pred.len);
                 const factor = (2.0 / N) * grad_scale;
 
-                // dL/dInput = (2/N) * (Input - Target)
                 for (0..pred.len) |i| {
                     d_input.data[i] = factor * (pred[i] - targ[i]);
                 }
@@ -423,7 +441,6 @@ pub fn MSEBackward(comptime T: type) type {
         pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
             if (self.input.ptr.creator) |c| try list.append(allocator, c);
-            // Targets usually don't have creators (they are data), but if they did:
             if (self.target.ptr.creator) |c| try list.append(allocator, c);
         }
 
@@ -440,8 +457,6 @@ pub fn MSEBackward(comptime T: type) type {
 pub fn mse_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(input) {
     const T = @TypeOf(input.ptr.data.data[0]);
 
-    // 1. Forward Calculation: Mean((Input - Target)^2)
-    // We compute this into a 1x1 Tensor (Scalar)
     var loss_val: T = 0.0;
     const pred = input.ptr.data.data;
     const targ = target.ptr.data.data;
@@ -454,8 +469,7 @@ pub fn mse_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(
     var data = try Tensor(T).init(allocator, &[_]usize{1});
     data.data[0] = loss_val;
 
-    // 2. Build Graph
-    const needs_grad = input.ptr.requires_grad; // Targets usually don't need grad
+    const needs_grad = input.ptr.requires_grad;
     var creator: ?*Function(T) = null;
 
     if (needs_grad) {
@@ -483,13 +497,16 @@ pub fn mse_loss(allocator: Allocator, input: anytype, target: anytype) !@TypeOf(
     return out;
 }
 
+// --- Dropout Operation ---
+// FIXED: Uses self.input (no broadcasting needed)
+
 pub fn DropoutBackward(comptime T: type) type {
     return struct {
         base: Function(T),
         allocator: Allocator,
         input: Variable(T),
-        mask: Tensor(T), // We must save the mask to use it in backward pass!
-        scale: T, // 1 / (1 - p)
+        mask: Tensor(T),
+        scale: T,
         output_grad: Tensor(T),
 
         const Self = @This();
@@ -499,19 +516,15 @@ pub fn DropoutBackward(comptime T: type) type {
             const self: *Self = @fieldParentPtr("base", ptr);
             const grad = self.output_grad;
 
+            // CORRECT: Check self.input, NOT self.input_a
             if (self.input.ptr.requires_grad) {
                 var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
                 defer d_input.deinit();
 
-                // dL/dx = dL/dy * mask * scale
+                // Element-wise multiply: grad * mask * scale
                 const count = grad.data.len;
-                const mask_data = self.mask.data;
-                const grad_data = grad.data;
-                const d_data = d_input.data;
-                const s = self.scale;
-
                 for (0..count) |i| {
-                    d_data[i] = grad_data[i] * mask_data[i] * s;
+                    d_input.data[i] = grad.data[i] * self.mask.data[i] * self.scale;
                 }
 
                 const input_grad = try self.input.getGrad();
@@ -532,33 +545,26 @@ pub fn DropoutBackward(comptime T: type) type {
         pub fn deinit(ptr: *Function(T)) void {
             const self: *Self = @fieldParentPtr("base", ptr);
             self.output_grad.deinit();
-            self.mask.deinit(); // Free the saved mask
-            self.input.deinit(); // Release reference to input
+            self.mask.deinit();
+            self.input.deinit();
             self.allocator.destroy(self);
         }
     };
 }
 
-/// The Builder
-/// rng: A pointer to std.rand.Random (e.g. &my_prng.random())
 pub fn dropout(allocator: Allocator, input: anytype, probability: anytype, rng: std.Random) !@TypeOf(input) {
     const T = @TypeOf(input.ptr.data.data[0]);
 
-    // 1. Generate Mask
-    // Inverted Dropout: scale by 1/(1-p) during training so inference needs no math
     const keep_prob = 1.0 - probability;
     const scale = 1.0 / keep_prob;
 
     var mask = try Tensor(T).init(allocator, input.ptr.data.shape);
     const mask_data = mask.data;
 
-    // Fill mask with Bernoulli(1-p)
-    // We iterate manually to fill the mask
     for (0..mask_data.len) |i| {
         mask_data[i] = if (rng.float(T) < keep_prob) 1.0 else 0.0;
     }
 
-    // 2. Forward: Output = Input * Mask * Scale
     const out_data = try Tensor(T).init(allocator, input.ptr.data.shape);
     const input_data = input.ptr.data.data;
     const out_slice = out_data.data;
@@ -567,7 +573,6 @@ pub fn dropout(allocator: Allocator, input: anytype, probability: anytype, rng: 
         out_slice[i] = input_data[i] * mask_data[i] * scale;
     }
 
-    // 3. Build Graph
     const needs_grad = input.ptr.requires_grad;
     var creator: ?*Function(T) = null;
 
@@ -585,14 +590,12 @@ pub fn dropout(allocator: Allocator, input: anytype, probability: anytype, rng: 
             },
             .allocator = allocator,
             .input = input.clone(),
-            .mask = mask, // Hand over ownership of mask to Node
+            .mask = mask,
             .scale = scale,
             .output_grad = grad,
         };
         creator = &op.base;
     } else {
-        // If no graph is built, the node won't exist to free the mask later,
-        // so we must free it now.
         mask.deinit();
     }
 

@@ -26,8 +26,9 @@ pub fn Dropout(comptime T: type) type {
         }
 
         // Dropout has no trainable parameters
-        pub fn parameters(self: Self, list: *std.ArrayList(VarT)) !void {
+        pub fn parameters(self: Self, allocator: Allocator, list: *std.ArrayListUnmanaged(VarT)) !void {
             _ = self;
+            _ = allocator;
             _ = list;
         }
 
