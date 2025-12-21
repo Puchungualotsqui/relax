@@ -355,3 +355,29 @@ test "scalar operations" {
     try std.testing.expectEqual(@as(f32, 4.0), t2.at(&[_]usize{0}));
     try std.testing.expectEqual(@as(f32, 9.0), t2.at(&[_]usize{1}));
 }
+
+test "metadata views: squeeze, unsqueeze, permute" {
+    const allocator = std.testing.allocator;
+
+    // Start with (2, 3)
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 3 }, &[_]f32{ 1, 2, 3, 4, 5, 6 });
+    defer t.deinit();
+
+    // 1. Unsqueeze -> (2, 1, 3)
+    var t_un = try t.unsqueeze(1);
+    defer t_un.deinit();
+    try std.testing.expectEqual(@as(usize, 1), t_un.shape[1]);
+    try std.testing.expectEqual(@as(f32, 4.0), t_un.at(&[_]usize{ 1, 0, 0 }));
+
+    // 2. Squeeze -> Back to (2, 3)
+    var t_sq = try t_un.squeeze(1);
+    defer t_sq.deinit();
+    try std.testing.expectEqual(@as(usize, 2), t_sq.shape.len);
+
+    // 3. Permute (swap 0 and 1) -> (3, 2)
+    var t_per = try t.permute(&[_]usize{ 1, 0 });
+    defer t_per.deinit();
+    try std.testing.expectEqual(@as(usize, 3), t_per.shape[0]);
+    // Logical (1, 0) in (3, 2) is physical (0, 1) in (2, 3) which is '2'
+    try std.testing.expectEqual(@as(f32, 2.0), t_per.at(&[_]usize{ 1, 0 }));
+}

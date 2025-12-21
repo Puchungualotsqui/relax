@@ -530,5 +530,122 @@ pub fn Tensor(comptime T: type) type {
             ops.addScalar(&dest, self, value);
             return dest;
         }
+
+        /// Adds a dimension of size 1 at the specified axis.
+        pub fn unsqueeze(self: *const Self, axis: usize) !Self {
+            if (axis > self.shape.len) return error.InvalidAxis;
+
+            const new_ndim = self.shape.len + 1;
+            const new_shape = try self.allocator.alloc(usize, new_ndim);
+            const new_strides = try self.allocator.alloc(usize, new_ndim);
+
+            var old_i: usize = 0;
+            for (0..new_ndim) |new_i| {
+                if (new_i == axis) {
+                    new_shape[new_i] = 1;
+                    // The stride for a dimension of size 1 can be anything,
+                    // but we usually use the stride of the next dimension.
+                    new_strides[new_i] = if (old_i < self.strides.len) self.strides[old_i] else 1;
+                } else {
+                    new_shape[new_i] = self.shape[old_i];
+                    new_strides[new_i] = self.strides[old_i];
+                    old_i += 1;
+                }
+            }
+
+            self.storage.ref_count += 1;
+            return Self{
+                .data = self.data,
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Removes a dimension of size 1 at the specified axis.
+        pub fn squeeze(self: *const Self, axis: usize) !Self {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+            if (self.shape[axis] != 1) return error.DimensionNotSqueezable;
+
+            const new_ndim = self.shape.len - 1;
+            const new_shape = try self.allocator.alloc(usize, new_ndim);
+            const new_strides = try self.allocator.alloc(usize, new_ndim);
+
+            var new_i: usize = 0;
+            for (self.shape, 0..) |dim, old_i| {
+                if (old_i == axis) continue;
+                new_shape[new_i] = dim;
+                new_strides[new_i] = self.strides[old_i];
+                new_i += 1;
+            }
+
+            self.storage.ref_count += 1;
+            return Self{
+                .data = self.data,
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
+        }
+
+        /// Reorders axes based on the provided dimensions.
+        /// Example: permute(&[_]usize{0, 2, 1}) swaps the last two dimensions.
+        pub fn permute(self: *const Self, dims: []const usize) !Self {
+            if (dims.len != self.shape.len) return error.InvalidRank;
+
+            // Check if dims is a valid permutation of [0...rank-1]
+            var check = [_]bool{false} ** 16;
+            for (dims) |d| {
+                if (d >= self.shape.len or check[d]) return error.InvalidPermutation;
+                check[d] = true;
+            }
+
+            const new_shape = try self.allocator.alloc(usize, self.shape.len);
+            const new_strides = try self.allocator.alloc(usize, self.shape.len);
+
+            for (dims, 0..) |old_axis, new_axis| {
+                new_shape[new_axis] = self.shape[old_axis];
+                new_strides[new_axis] = self.strides[old_axis];
+            }
+
+            self.storage.ref_count += 1;
+            return Self{
+                .data = self.data,
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
+        }
+
+        pub fn flatten(self: *const Self) !Self {
+            if (!self.isContiguous()) {
+                // Flattening a non-contiguous tensor requires a copy (clone) first
+                // to ensure the 1D view matches the expected logical order.
+                var contiguous_self = try self.clone();
+                defer contiguous_self.deinit();
+                return try contiguous_self.flatten();
+            }
+
+            const new_shape = try self.allocator.alloc(usize, 1);
+            const new_strides = try self.allocator.alloc(usize, 1);
+
+            var total: usize = 1;
+            for (self.shape) |s| total *= s;
+
+            new_shape[0] = total;
+            new_strides[0] = 1;
+
+            self.storage.ref_count += 1;
+            return Self{
+                .data = self.data,
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
+        }
     };
 }
