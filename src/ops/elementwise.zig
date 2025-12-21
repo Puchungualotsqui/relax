@@ -189,23 +189,14 @@ pub fn calculateBroadcastShape(allocator: Allocator, shape_a: []const usize, sha
 }
 
 /// Performs element-wise addition: self = self + other
-pub fn add(self: anytype, other: anytype) TensorError!void {
-    const T = @TypeOf(self.data[0]);
-    if (self.data.len != other.data.len) return error.IncompatibleShapes;
+pub fn add(self: anytype, other: anytype) !void {
+    const closures = struct {
+        fn apply(d: *@TypeOf(self.data[0]), s: @TypeOf(self.data[0])) void {
+            d.* += s;
+        }
+    };
 
-    const simd_len = std.simd.suggestVectorLength(T) orelse 8;
-    const Vec = @Vector(simd_len, T);
-
-    var i: usize = 0;
-    while (i + simd_len <= self.data.len) : (i += simd_len) {
-        const v1: Vec = self.data[i..][0..simd_len].*;
-        const v2: Vec = other.data[i..][0..simd_len].*;
-        self.data[i..][0..simd_len].* = v1 + v2;
-    }
-
-    while (i < self.data.len) : (i += 1) {
-        self.data[i] += other.data[i];
-    }
+    try broadcastOp(self, other, closures.apply);
 }
 
 pub fn reduce(dest: anytype, src: anytype, axis: usize, comptime init_val: anytype, comptime op_scalar: anytype) void {

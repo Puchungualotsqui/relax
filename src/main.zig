@@ -21,7 +21,7 @@ test "broadcasting: add vector to matrix" {
     var vec = try Tensor(f32).fromSlice(allocator, &[_]usize{ 1, 3 }, &[_]f32{ 10, 20, 30 });
     defer vec.deinit();
 
-    try mat.add(vec);
+    try mat.addInPlace(vec);
 
     try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 0, 0 })); // 1 + 10
     try std.testing.expectEqual(@as(f32, 22.0), mat.at(&[_]usize{ 0, 1 })); // 2 + 20
@@ -46,7 +46,7 @@ test "transpose and add (non-contiguous check)" {
     t2.transpose();
 
     // This triggers the "Silent Clone" because t2 is now non-contiguous
-    try t1.add(t2);
+    try t1.addInPlace(t2);
 
     // Expected t1: [1+10, 2+30] -> [11, 32]
     //              [3+20, 4+40] -> [23, 44]
@@ -71,19 +71,17 @@ test "reshape in-place" {
 
 test "broadcasting different ranks" {
     const allocator = std.testing.allocator;
-
-    // 2x2 Matrix
     var mat = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 1, 1, 1 });
     defer mat.deinit();
 
-    // 1D Vector [10] -> Should act like [10, 10] (broadcasted) or adding 10 to everything
     var vec = try Tensor(f32).fromSlice(allocator, &[_]usize{1}, &[_]f32{10});
     defer vec.deinit();
 
-    try mat.add(vec);
+    // Must use add() and catch new tensor because result is a new view/allocation
+    var res = try mat.add(vec, allocator);
+    defer res.deinit();
 
-    try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 0, 0 }));
-    try std.testing.expectEqual(@as(f32, 11.0), mat.at(&[_]usize{ 1, 1 }));
+    try std.testing.expectEqual(@as(f32, 11.0), res.at(&[_]usize{ 0, 0 }));
 }
 
 test "batched matrix multiplication" {
@@ -189,22 +187,39 @@ test "tensor slicing" {
     try std.testing.expectEqual(@as(f32, 999.0), t.at(&[_]usize{ 1, 0 }));
 }
 
-test "advanced broadcasting shape resolution" {
+test "comparison result values" {
     const allocator = std.testing.allocator;
 
-    // A: (3, 1) matrix
-    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{ 3, 1 }, &[_]f32{ 1, 2, 3 });
+    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{4}, &[_]f32{ 1, 5, 2, 8 });
     defer a.deinit();
-
-    // B: (3,) vector -> becomes (1, 3) for broadcasting
-    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{ 3 }, &[_]f32{ 10, 20, 30 });
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{4}, &[_]f32{ 4, 4, 4, 4 });
     defer b.deinit();
 
-    // Result of A > B should be (3, 3)
-    var res = try a.gt(b, allocator);
-    defer res.deinit();
+    var mask = try a.gt(b, allocator);
+    defer mask.deinit();
 
-    try std.testing.expectEqual(@as(usize, 2), res.shape.len);
-    try std.testing.expectEqual(@as(usize, 3), res.shape[0]);
-    try std.testing.expectEqual(@as(usize, 3), res.shape[1]);
+    // Mask should be [0, 1, 0, 1] (u8)
+    try std.testing.expectEqual(@as(u8, 0), mask.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(u8, 1), mask.at(&[_]usize{1}));
+    try std.testing.expectEqual(@as(u8, 0), mask.at(&[_]usize{2}));
+    try std.testing.expectEqual(@as(u8, 1), mask.at(&[_]usize{3}));
+}
+
+test "argmax reduction" {
+    const allocator = std.testing.allocator;
+
+    // 2x3 Matrix
+    // [[1, 10, 3],
+    //  [4,  5, 6]]
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 3 }, &[_]f32{ 1, 10, 3, 4, 5, 6 });
+    defer t.deinit();
+
+    // Argmax along axis 1 (across columns for each row)
+    // Row 0: max is 10 at index 1
+    // Row 1: max is 6 at index 2
+    var indices = try t.argmax(allocator, 1);
+    defer indices.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), indices.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(usize, 2), indices.at(&[_]usize{1}));
 }

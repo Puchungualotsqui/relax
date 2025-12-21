@@ -265,20 +265,81 @@ pub fn Tensor(comptime T: type) type {
             return dest;
         }
 
-        pub fn add(self: *Self, other: Self) TensorError!void {
-            // 1. Check if shapes are exactly the same for SIMD path
-            if (std.mem.eql(usize, self.shape, other.shape) and self.isContiguous() and other.isContiguous()) {
-                return ops.add(self, other);
+        pub fn argmax(self: Self, allocator: std.mem.Allocator, axis: usize) !Tensor(usize) {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+
+            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
+            defer allocator.free(new_shape);
+            var d_count: usize = 0;
+            for (self.shape, 0..) |s, i| {
+                if (i == axis) continue;
+                new_shape[d_count] = s;
+                d_count += 1;
             }
 
-            // 2. Otherwise, use Broadcasting path (Slower but flexible)
-            const closures = struct {
-                fn add(d: *T, s: T) void {
-                    d.* += s;
+            var dest = try Tensor(usize).init(allocator, new_shape);
+            var max_vals = try Self.init(allocator, new_shape);
+            defer max_vals.deinit();
+            max_vals.fill(std.math.floatMin(T));
+
+            const s_ndim = self.shape.len;
+            var indices = [_]usize{0} ** 16;
+            var src_offset: usize = 0;
+
+            for (0..self.data.len) |_| {
+                // Calculate destination offset accurately
+                var d_offset: usize = 0;
+                var current_d_dim: usize = 0;
+                for (0..s_ndim) |dim| {
+                    if (dim == axis) continue;
+                    d_offset += indices[dim] * dest.strides[current_d_dim];
+                    current_d_dim += 1;
                 }
+
+                const val = self.data[src_offset];
+                if (val > max_vals.data[d_offset]) {
+                    max_vals.data[d_offset] = val;
+                    dest.data[d_offset] = indices[axis];
+                }
+
+                // Rolling index update
+                var j = s_ndim;
+                while (j > 0) {
+                    j -= 1;
+                    indices[j] += 1;
+                    if (indices[j] < self.shape[j]) {
+                        src_offset += self.strides[j];
+                        break;
+                    } else {
+                        src_offset -= (self.shape[j] - 1) * self.strides[j];
+                        indices[j] = 0;
+                    }
+                }
+            }
+            return dest;
+        }
+
+        pub fn add(self: Self, other: Self, allocator: Allocator) !Self {
+            const out_shape = try ops.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+
+            var dest = try Self.init(allocator, out_shape);
+
+            const closures = struct {
+                fn apply(d: *T, s1: T, s2: T) void { d.* = s1 + s2; }
             };
 
-            try ops.broadcastOp(self, other, closures.add);
+            // Use broadcastOp2 for dest = src1 + src2
+            try ops.broadcastOp2(&dest, self, other, closures.apply);
+            return dest;
+        }
+
+        pub fn addInPlace(self: *Self, other: Self) !void {
+            const closures = struct {
+                fn apply(d: *T, s: T) void { d.* += s; }
+            };
+            // broadcastOp already validates if 'other' can fit into 'self'
+            try ops.broadcastOp(self, other, closures.apply);
         }
 
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
