@@ -146,27 +146,61 @@ pub fn Sequential(comptime T: type) type {
             }
         }
 
+        pub const FitConfig = struct {
+            epochs: usize,
+            val_data: ?struct { x: Tensor(T), y: Tensor(T) } = null,
+            verbose: bool = true,
+            patience: ?usize = null,
+        };
+
         /// Trains the model for a fixed number of epochs.
         /// Takes raw Tensors (x, y), creates copies for the graph, and runs the loop.
-        pub fn fit(self: *Self, x: Tensor(T), y: Tensor(T), epochs: usize) !void {
+        pub fn fit(self: *Self, x: Tensor(T), y: Tensor(T), config: FitConfig) !void {
             if (self.optimizer == null or self.loss_fn == null) {
                 return error.ModelNotCompiled;
             }
 
             if (x.shape[0] != y.shape[0]) return error.BatchSizeMismatch;
 
-            // ... (setup x_var, y_var) ...
+            // Wrap training data
             var x_var = try VarT.init(self.allocator, try x.clone(), false);
             defer x_var.deinit();
             var y_var = try VarT.init(self.allocator, try y.clone(), false);
             defer y_var.deinit();
 
+            // Wrap validation data if provided
+            var val_vars: ?struct { x: VarT, y: VarT } = null;
+            if (config.val_data) |vd| {
+                const vx = try VarT.init(self.allocator, try vd.x.clone(), false);
+                const vy = try VarT.init(self.allocator, try vd.y.clone(), false);
+                val_vars = .{ .x = vx, .y = vy };
+            }
+            defer if (val_vars) |vv| {
+                vv.x.deinit();
+                vv.y.deinit();
+            };
+
             // Use pointer capture for optimizer calls
             var opt_ptr = &self.optimizer.?;
 
+            const CheckpointT = @import("checkpoint.zig").Checkpoint(T);
+            var best_checkpoint: ?CheckpointT = null;
+            defer if (best_checkpoint) |*cp| cp.deinit();
+
+            var best_val_loss = std.math.inf(T);
+            const params = try self.parameters();
+            // We must manage this list since model.parameters() returns an unmanaged list
+            defer {
+                for (params.items) |p| p.deinit();
+                var p_list = params;
+                p_list.deinit(self.allocator);
+            }
+
+            var patience_counter: usize = 0;
+
             std.debug.print("Training on {d} samples...\n", .{x.shape[0]});
 
-            for (0..epochs) |epoch| {
+            for (0..config.epochs) |epoch| {
                 // A. Zero Grad (Call on pointer)
                 try opt_ptr.zeroGrad();
 
@@ -178,14 +212,54 @@ pub fn Sequential(comptime T: type) type {
                 defer loss.deinit();
 
                 try loss.backward();
-
-                // E. Step (Call on pointer)
                 try opt_ptr.step();
 
-                if (epoch % 10 == 0 or epoch == epochs - 1) {
-                    const val = loss.ptr.data.data[0];
-                    std.debug.print("Epoch {d}/{d} \t Loss: {d:.4}\n", .{ epoch + 1, epochs, val });
+                // --- VALIDATION STEP ---
+                var val_loss_val: ?T = null;
+                if (val_vars) |vv| {
+                    // Inference mode (is_training = false)
+                    var v_preds = try self.forward(vv.x, false);
+                    defer v_preds.deinit();
+
+                    var v_loss = try self.loss_fn.?(self.allocator, v_preds, vv.y);
+                    defer v_loss.deinit();
+                    val_loss_val = v_loss.ptr.data.data[0];
+
+                    if (val_loss_val.? < best_val_loss) {
+                        best_val_loss = val_loss_val.?;
+                        patience_counter = 0;
+
+                        // Clean old checkpoint
+                        if (best_checkpoint) |*cp| cp.deinit();
+                        // Capture new best weights
+                        best_checkpoint = try CheckpointT.capture(self.allocator, params);
+                    } else {
+                        patience_counter += 1;
+                    }
+
+                    if (config.patience) |p| {
+                        if (patience_counter >= p) {
+                            if (config.verbose) std.debug.print("\nEarly stopping triggered at epoch {d}\n", .{epoch + 1});
+                            break;
+                        }
+                    }
                 }
+
+                // --- LOGGING ---
+                if (config.verbose and (epoch % 10 == 0 or epoch == config.epochs - 1)) {
+                    const train_loss = loss.ptr.data.data[0];
+                    if (val_loss_val) |vl| {
+                        std.debug.print("Epoch {d}/{d} - loss: {d:.4} - val_loss: {d:.4}\n", .{ epoch + 1, config.epochs, train_loss, vl });
+                    } else {
+                        std.debug.print("Epoch {d}/{d} - loss: {d:.4}\n", .{ epoch + 1, config.epochs, train_loss });
+                    }
+                }
+            }
+
+            // After the loop, restore the best parameters found
+            if (best_checkpoint) |cp| {
+                try cp.restore(params);
+                if (config.verbose) std.debug.print("Restored best model with val_loss: {d:.4}\n", .{best_val_loss});
             }
         }
 
