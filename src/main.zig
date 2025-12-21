@@ -381,3 +381,31 @@ test "metadata views: squeeze, unsqueeze, permute" {
     // Logical (1, 0) in (3, 2) is physical (0, 1) in (2, 3) which is '2'
     try std.testing.expectEqual(@as(f32, 2.0), t_per.at(&[_]usize{ 1, 0 }));
 }
+
+test "fused matmul with bias (linear layer)" {
+    const allocator = std.testing.allocator;
+
+    // X: (2, 2)
+    var x = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 2, 3, 4 });
+    defer x.deinit();
+
+    // W: (2, 2)
+    var w = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 10, 20, 30, 40 });
+    defer w.deinit();
+
+    // B: (2,)
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{2}, &[_]f32{ 5, 10 });
+    defer b.deinit();
+
+    // Destination: (2, 2)
+    var res = try Tensor(f32).init(allocator, &[_]usize{ 2, 2 });
+    defer res.deinit();
+
+    // Using the method API on the tensor itself
+    try x.linear(w, b, &res);
+
+    try std.testing.expectEqual(@as(f32, 75.0), res.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 110.0), res.at(&[_]usize{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 155.0), res.at(&[_]usize{ 1, 0 }));
+    try std.testing.expectEqual(@as(f32, 230.0), res.at(&[_]usize{ 1, 1 }));
+}

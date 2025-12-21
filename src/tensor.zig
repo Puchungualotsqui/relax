@@ -410,7 +410,11 @@ pub fn Tensor(comptime T: type) type {
         }
 
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
-            return linalg.matmul(dest, self, other);
+            return linalg.matmul(dest, self, other, null);
+        }
+
+        pub fn linear(self: Self, weights: Self, bias: Self, dest: *Self) !void {
+            return linalg.matmul(dest, self, weights, bias);
         }
 
         pub fn sum(self: Self, allocator: std.mem.Allocator, axis: usize) !Self {
