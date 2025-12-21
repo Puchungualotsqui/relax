@@ -1,7 +1,11 @@
 const std = @import("std");
 const TensorError = @import("errors.zig").TensorError;
-const ops = @import("ops/elementwise.zig");
 const linalg = @import("ops/linalg.zig");
+const base = @import("ops/base.zig");
+const metadata = @import("ops/metadata.zig");
+const reductions = @import("ops/reductions.zig");
+const binary = @import("ops/binary.zig");
+const unary = @import("ops/unary.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn Tensor(comptime T: type) type {
@@ -71,7 +75,7 @@ pub fn Tensor(comptime T: type) type {
         }
 
         pub fn gt(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
-            const out_shape = try ops.calculateBroadcastShape(allocator, self.shape, other.shape);
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
             defer allocator.free(out_shape);
 
             var result = try Tensor(u8).init(allocator, out_shape);
@@ -129,7 +133,7 @@ pub fn Tensor(comptime T: type) type {
             }.apply;
 
             // Use our new logic
-            ops.broadcastOp(dest, self, closure);
+            base.broadcastOp(dest, self, closure);
         }
 
         pub fn reshape(self: *Self, new_shape: []const usize) !void {
@@ -262,7 +266,7 @@ pub fn Tensor(comptime T: type) type {
 
             var dest = try Self.init(allocator, new_shape);
 
-            try ops.concat(&dest, tensors, axis);
+            try metadata.concat(&dest, tensors, axis);
 
             return dest;
         }
@@ -350,7 +354,7 @@ pub fn Tensor(comptime T: type) type {
                 }
             }.apply;
 
-            ops.reduce(&dest, self, axis, std.math.floatMin(T), max_closure);
+            base.reduce(&dest, self, axis, std.math.floatMin(T), max_closure);
             return dest;
         }
 
@@ -365,7 +369,7 @@ pub fn Tensor(comptime T: type) type {
             }
 
             var dest = try Self.init(allocator, new_shape);
-            ops.mean(&dest, self, axis);
+            reductions.mean(&dest, self, axis);
             return dest;
         }
 
@@ -374,39 +378,45 @@ pub fn Tensor(comptime T: type) type {
             defer mu.deinit();
 
             var v_res = try Self.init(allocator, mu.shape);
-            ops.variance(&v_res, self, mu, axis);
+            reductions.variance(&v_res, self, mu, axis);
 
             // Standard Deviation is just sqrt(variance)
             var s_res = try Self.init(allocator, mu.shape);
             const sqrt_op = struct {
-                fn apply(d: *T, s: T) void { d.* = std.math.sqrt(s); }
+                fn apply(d: *T, s: T) void {
+                    d.* = std.math.sqrt(s);
+                }
             }.apply;
-            try ops.mapOp(&s_res, v_res, sqrt_op);
+            try base.mapOp(&s_res, v_res, sqrt_op);
 
             return .{ .v = v_res, .s = s_res };
         }
 
         pub fn add(self: Self, other: Self, allocator: Allocator) !Self {
-            const out_shape = try ops.calculateBroadcastShape(allocator, self.shape, other.shape);
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
             defer allocator.free(out_shape);
 
             var dest = try Self.init(allocator, out_shape);
 
             const closures = struct {
-                fn apply(d: *T, s1: T, s2: T) void { d.* = s1 + s2; }
+                fn apply(d: *T, s1: T, s2: T) void {
+                    d.* = s1 + s2;
+                }
             };
 
             // Use broadcastOp2 for dest = src1 + src2
-            try ops.broadcastOp2(&dest, self, other, closures.apply);
+            try base.broadcastOp2(&dest, self, other, closures.apply);
             return dest;
         }
 
         pub fn addInPlace(self: *Self, other: Self) !void {
             const closures = struct {
-                fn apply(d: *T, s: T) void { d.* += s; }
+                fn apply(d: *T, s: T) void {
+                    d.* += s;
+                }
             };
             // broadcastOp already validates if 'other' can fit into 'self'
-            try ops.broadcastOp(self, other, closures.apply);
+            try base.broadcastOp(self, other, closures.apply);
         }
 
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
@@ -440,7 +450,7 @@ pub fn Tensor(comptime T: type) type {
                 }
             };
 
-            ops.reduce(&dest, self, axis, @as(T, 0), closures.add);
+            base.reduce(&dest, self, axis, @as(T, 0), closures.add);
             return dest;
         }
 
@@ -450,7 +460,7 @@ pub fn Tensor(comptime T: type) type {
                     d.* = if (val_a == val_b) 1 else 0;
                 }
             };
-            try ops.broadcastOp2(dest, a, b, closures.apply);
+            try base.broadcastOp2(dest, a, b, closures.apply);
         }
 
         pub fn greaterThan(dest: anytype, a: anytype, b: anytype) !void {
@@ -459,7 +469,7 @@ pub fn Tensor(comptime T: type) type {
                     d.* = if (val_a > val_b) 1 else 0;
                 }
             };
-            try ops.broadcastOp2(dest, a, b, closures.apply);
+            try base.broadcastOp2(dest, a, b, closures.apply);
         }
 
         pub fn where(allocator: Allocator, mask: Tensor(u8), a: Self, b: Self) !Self {
@@ -468,7 +478,7 @@ pub fn Tensor(comptime T: type) type {
             var dest = try Self.init(allocator, mask.shape);
 
             // 2. Call the optimized operation
-            try ops.where(&dest, mask, a, b);
+            try binary.where(&dest, mask, a, b);
 
             return dest;
         }
@@ -477,21 +487,21 @@ pub fn Tensor(comptime T: type) type {
         pub fn select(self: anytype, a: anytype, b: anytype, allocator: Allocator) !@TypeOf(a) {
             // Ensure we use 'Self' (which is Tensor(T)) to match the input types
             var dest = try @TypeOf(a).init(allocator, self.shape);
-            try ops.where(&dest, self, a, b);
+            try binary.where(&dest, self, a, b);
             return dest;
         }
 
         /// Returns a new tensor clipped to [min, max]
         pub fn clipped(self: Self, allocator: Allocator, min_val: T, max_val: T) !Self {
             var dest = try Self.init(allocator, self.shape);
-            try ops.clip(&dest, self, min_val, max_val);
+            try unary.clip(&dest, self, min_val, max_val);
             return dest;
         }
 
         /// Clips the current tensor in-place
         pub fn clipInPlace(self: *Self, min_val: T, max_val: T) !void {
             // Passing self.* dereferences the pointer to match 'anytype' in ops
-            try ops.clip(self, self.*, min_val, max_val);
+            try unary.clip(self, self.*, min_val, max_val);
         }
 
         pub fn logSumExp(self: Self, allocator: Allocator, axis: usize) !Self {
@@ -511,27 +521,27 @@ pub fn Tensor(comptime T: type) type {
             var dest = try Self.init(allocator, new_shape);
 
             // 3. Call the fused operation
-            try ops.logSumExp(&dest, self, axis);
+            try reductions.logSumExp(&dest, self, axis);
 
             return dest;
         }
 
         pub fn addScalar(self: *Self, value: T) void {
-            ops.addScalar(self, self.*, value);
+            unary.addScalar(self, self.*, value);
         }
 
         pub fn mulScalar(self: *Self, value: T) void {
-            ops.mulScalar(self, self.*, value);
+            unary.mulScalar(self, self.*, value);
         }
 
         pub fn powScalar(self: *Self, value: T) void {
-            ops.powScalar(self, self.*, value);
+            unary.powScalar(self, self.*, value);
         }
 
         // Allocating version (Functional style)
         pub fn scalarAdd(self: Self, value: T, allocator: Allocator) !Self {
             var dest = try Self.init(allocator, self.shape);
-            ops.addScalar(&dest, self, value);
+            unary.addScalar(&dest, self, value);
             return dest;
         }
 
