@@ -68,6 +68,17 @@ pub fn Tensor(comptime T: type) type {
             self.storage.deinit();
         }
 
+        pub fn gt(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
+            const out_shape = try ops.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+
+            var result = try Tensor(u8).init(allocator, out_shape);
+
+            try greaterThan(&result, self, other);
+
+            return result;
+        }
+
         // Helper to check if memory is contiguous (needed for SIMD)
         pub fn isContiguous(self: Self) bool {
             var expected_stride: usize = 1;
@@ -299,6 +310,24 @@ pub fn Tensor(comptime T: type) type {
 
             ops.reduce(&dest, self, axis, @as(T, 0), closures.add);
             return dest;
+        }
+
+        pub fn equal(dest: anytype, a: anytype, b: anytype) !void {
+            const closures = struct {
+                fn apply(d: *u8, val_a: anytype, val_b: anytype) void {
+                    d.* = if (val_a == val_b) 1 else 0;
+                }
+            };
+            try ops.broadcastOp2(dest, a, b, closures.apply);
+        }
+
+        pub fn greaterThan(dest: anytype, a: anytype, b: anytype) !void {
+            const closures = struct {
+                fn apply(d: *u8, val_a: anytype, val_b: anytype) void {
+                    d.* = if (val_a > val_b) 1 else 0;
+                }
+            };
+            try ops.broadcastOp2(dest, a, b, closures.apply);
         }
     };
 }

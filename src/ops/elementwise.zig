@@ -1,6 +1,7 @@
 const std = @import("std");
 const TensorError = @import("../errors.zig").TensorError;
 const Tensor = @import("../tensor.zig").Tensor;
+const Allocator = std.mem.Allocator;
 
 pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !void {
     const d_ndim = dest.shape.len;
@@ -80,6 +81,111 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
             }
         }
     }
+}
+
+pub fn broadcastOp2(dest: anytype, src_a: anytype, src_b: anytype, comptime op_scalar: anytype) !void {
+    const d_ndim = dest.shape.len;
+    const sa_ndim = src_a.shape.len;
+    const sb_ndim = src_b.shape.len;
+
+    // --- Validation (Simplified for brevity, same logic as before for both srcs) ---
+    if (sa_ndim > d_ndim or sb_ndim > d_ndim) return error.IncompatibleShapes;
+
+    const inner_len = dest.shape[d_ndim - 1];
+    const outer_elements = dest.data.len / inner_len;
+
+    const sa_is_bcast = if (sa_ndim > 0) src_a.shape[sa_ndim - 1] == 1 else true;
+    const sb_is_bcast = if (sb_ndim > 0) src_b.shape[sb_ndim - 1] == 1 else true;
+
+    // SIMD only if both sources and dest are contiguous and not broadcasting in the inner dim
+    const can_simd = !sa_is_bcast and !sb_is_bcast and
+        (src_a.strides[sa_ndim - 1] == 1) and
+        (src_b.strides[sb_ndim - 1] == 1) and
+        (dest.strides[d_ndim - 1] == 1);
+
+    var indices = [_]usize{0} ** 16;
+    var cur_a: usize = 0;
+    var cur_b: usize = 0;
+    var cur_d: usize = 0;
+
+    for (0..outer_elements) |block_idx| {
+        if (can_simd) {
+            const d_ptr = dest.data[cur_d..][0..inner_len];
+            const a_ptr = src_a.data[cur_a..][0..inner_len];
+            const b_ptr = src_b.data[cur_b..][0..inner_len];
+
+            for (d_ptr, a_ptr, b_ptr) |*d, a, b| {
+                op_scalar(d, a, b);
+            }
+        } else {
+            const s_a = if (!sa_is_bcast and sa_ndim > 0) src_a.strides[sa_ndim - 1] else 0;
+            const s_b = if (!sb_is_bcast and sb_ndim > 0) src_b.strides[sb_ndim - 1] else 0;
+            const s_d = dest.strides[d_ndim - 1];
+
+            for (0..inner_len) |k| {
+                op_scalar(&dest.data[cur_d + k * s_d], src_a.data[cur_a + k * s_a], src_b.data[cur_b + k * s_b]);
+            }
+        }
+
+        // Rolling Index Update (Update 3 pointers)
+        if (d_ndim > 1 and block_idx < outer_elements - 1) {
+            var j = d_ndim - 1;
+            while (j > 0) {
+                j -= 1;
+                indices[j] += 1;
+                if (indices[j] < dest.shape[j]) {
+                    cur_d += dest.strides[j];
+                    // Update A
+                    const sa_diff = @as(isize, @intCast(d_ndim)) - @as(isize, @intCast(sa_ndim));
+                    const sa_idx = @as(isize, @intCast(j)) - sa_diff;
+                    if (sa_idx >= 0 and src_a.shape[@intCast(sa_idx)] != 1) cur_a += src_a.strides[@intCast(sa_idx)];
+                    // Update B
+                    const sb_diff = @as(isize, @intCast(d_ndim)) - @as(isize, @intCast(sb_ndim));
+                    const sb_idx = @as(isize, @intCast(j)) - sb_diff;
+                    if (sb_idx >= 0 and src_b.shape[@intCast(sb_idx)] != 1) cur_b += src_b.strides[@intCast(sb_idx)];
+                    break;
+                } else {
+                    indices[j] = 0;
+                    cur_d -= (dest.shape[j] - 1) * dest.strides[j];
+                    // Reset A
+                    const sa_diff = @as(isize, @intCast(d_ndim)) - @as(isize, @intCast(sa_ndim));
+                    const sa_idx = @as(isize, @intCast(j)) - sa_diff;
+                    if (sa_idx >= 0 and src_a.shape[@intCast(sa_idx)] != 1) cur_a -= (src_a.shape[@intCast(sa_idx)] - 1) * src_a.strides[@intCast(sa_idx)];
+                    // Reset B
+                    const sb_diff = @as(isize, @intCast(d_ndim)) - @as(isize, @intCast(sb_ndim));
+                    const sb_idx = @as(isize, @intCast(j)) - sb_diff;
+                    if (sb_idx >= 0 and src_b.shape[@intCast(sb_idx)] != 1) cur_b -= (src_b.shape[@intCast(sb_idx)] - 1) * src_b.strides[@intCast(sb_idx)];
+                }
+            }
+        }
+    }
+}
+
+pub fn calculateBroadcastShape(allocator: Allocator, shape_a: []const usize, shape_b: []const usize) ![]usize {
+    const rank_a = shape_a.len;
+    const rank_b = shape_b.len;
+    const out_rank = @max(rank_a, rank_b);
+
+    const out_shape = try allocator.alloc(usize, out_rank);
+    errdefer allocator.free(out_shape);
+
+    var i: usize = 0;
+    while (i < out_rank) : (i += 1) {
+        // Indices from the right
+        const a_idx = if (i < rank_a) rank_a - 1 - i else null;
+        const b_idx = if (i < rank_b) rank_b - 1 - i else null;
+
+        const dim_a = if (a_idx) |idx| shape_a[idx] else 1;
+        const dim_b = if (b_idx) |idx| shape_b[idx] else 1;
+
+        if (dim_a != dim_b and dim_a != 1 and dim_b != 1) {
+            return TensorError.IncompatibleShapes;
+        }
+
+        out_shape[out_rank - 1 - i] = @max(dim_a, dim_b);
+    }
+
+    return out_shape;
 }
 
 /// Performs element-wise addition: self = self + other

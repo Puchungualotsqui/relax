@@ -188,3 +188,23 @@ test "tensor slicing" {
     view.data[0] = 999.0;
     try std.testing.expectEqual(@as(f32, 999.0), t.at(&[_]usize{ 1, 0 }));
 }
+
+test "advanced broadcasting shape resolution" {
+    const allocator = std.testing.allocator;
+
+    // A: (3, 1) matrix
+    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{ 3, 1 }, &[_]f32{ 1, 2, 3 });
+    defer a.deinit();
+
+    // B: (3,) vector -> becomes (1, 3) for broadcasting
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{ 3 }, &[_]f32{ 10, 20, 30 });
+    defer b.deinit();
+
+    // Result of A > B should be (3, 3)
+    var res = try a.gt(b, allocator);
+    defer res.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), res.shape.len);
+    try std.testing.expectEqual(@as(usize, 3), res.shape[0]);
+    try std.testing.expectEqual(@as(usize, 3), res.shape[1]);
+}
