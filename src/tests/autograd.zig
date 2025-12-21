@@ -119,3 +119,34 @@ test "Autograd: Add Operation" {
     try std.testing.expect(b.grad != null);
     try std.testing.expectEqual(@as(f32, 1.0), b.grad.?.at(&[_]usize{0}));
 }
+
+test "Autograd: Full Backward Pass (c = a + b)" {
+    // 1. Create Leafs (a=10, b=20)
+    const t_a = try TensorF32.fromSlice(allocator, &[_]usize{1}, &[_]f32{10.0});
+    var a = VarF32.init(allocator, t_a, true);
+    defer a.deinit();
+
+    const t_b = try TensorF32.fromSlice(allocator, &[_]usize{1}, &[_]f32{20.0});
+    var b = VarF32.init(allocator, t_b, true);
+    defer b.deinit();
+
+    // 2. Forward (c = a + b)
+    var c = try ops.add(allocator, &a, &b);
+    defer c.deinit();
+
+    // 3. Backward
+    // This should:
+    // - Set c.grad to 1.0
+    // - Sort the graph (c -> a, b)
+    // - Run AddBackward: adds c.grad to a.grad and b.grad
+    try c.backward();
+
+    // 4. Verify Gradients
+    // dL/da = 1.0
+    const ga = try a.getGrad();
+    try std.testing.expectEqual(@as(f32, 1.0), ga.at(&[_]usize{0}));
+
+    // dL/db = 1.0
+    const gb = try b.getGrad();
+    try std.testing.expectEqual(@as(f32, 1.0), gb.at(&[_]usize{0}));
+}

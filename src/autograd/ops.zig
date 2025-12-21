@@ -4,80 +4,94 @@ const Variable = @import("variable.zig").Variable;
 const Function = @import("function.zig").Function;
 const Allocator = std.mem.Allocator;
 
-/// Backward Node for Addition: c = a + b
-/// Gradients: grad_a += grad_c, grad_b += grad_c
 pub fn AddBackward(comptime T: type) type {
     return struct {
-        // Inheritance: Embed the interface
         base: Function(T),
-
         allocator: Allocator,
-        // Pointers to parents to update their gradients
+
         input_a: *Variable(T),
         input_b: *Variable(T),
+
+        // The node owns the gradient for the variable it created!
+        output_grad: Tensor(T),
 
         const Self = @This();
         const TensorT = Tensor(T);
 
-        pub fn backward(ptr: *Function(T), grad_output: TensorT) !void {
-            // Downcast from interface to concrete struct
+        pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
 
-            // 1. Update A's Gradient
+            // We use our OWN stored gradient
+            const grad = self.output_grad;
+
             if (self.input_a.requires_grad) {
-                // Ensure grad tensor is allocated
-                try self.input_a.zeroGrad();
-
-                // Accumulate: grad_a += grad_output * 1.0
-                // Note: In a full framework, we would handle broadcasting here
-                // (summing axes if shape_a != shape_output).
-                // For now, we assume shapes match.
-                try self.input_a.grad.?.addInPlace(grad_output);
+                // We ask the parent for its gradient pointer (handles leaf/non-leaf logic)
+                const a_grad = try self.input_a.getGrad();
+                try a_grad.addInPlace(grad);
             }
 
-            // 2. Update B's Gradient
             if (self.input_b.requires_grad) {
-                try self.input_b.zeroGrad();
-                try self.input_b.grad.?.addInPlace(grad_output);
+                const b_grad = try self.input_b.getGrad();
+                try b_grad.addInPlace(grad);
             }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), list: *std.ArrayList(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input_a.creator) |c| try list.append(c);
+            if (self.input_b.creator) |c| try list.append(c);
         }
 
         pub fn deinit(ptr: *Function(T)) void {
             const self: *Self = @fieldParentPtr("base", ptr);
+            // We own this tensor, so we free it
+            self.output_grad.deinit();
             self.allocator.destroy(self);
         }
     };
 }
 
-/// The User-Facing Forward Function
 pub fn add(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a.*) {
     const T = @TypeOf(a.data.data[0]);
     const VarT = Variable(T);
+    const OpT = AddBackward(T);
 
-    // 1. Compute Forward Data (using your existing Tensor engine)
+    // 1. Forward
     const data = try a.data.add(b.data, allocator);
 
-    // 2. Check if we need to build the graph
+    // 2. Build Graph if needed
     const needs_grad = a.requires_grad or b.requires_grad;
-
     var creator: ?*Function(T) = null;
 
     if (needs_grad) {
-        // 3. Allocate and Setup Backward Node
-        const op = try allocator.create(AddBackward(T));
+        const op = try allocator.create(OpT);
+
+        // Initialize the gradient tensor for this node (zeroed)
+        const grad = try Tensor(T).init(allocator, data.shape);
+        grad.fill(0); // Important!
+
         op.* = .{
             .base = .{
-                .backward_fn = AddBackward(T).backward,
-                .deinit_fn = AddBackward(T).deinit,
+                .backward_fn = OpT.backward,
+                .collect_parents_fn = OpT.collectParents,
+                .get_grad_fn = OpT.getGrad,
+                .deinit_fn = OpT.deinit,
             },
             .allocator = allocator,
             .input_a = a,
             .input_b = b,
+            .output_grad = grad,
         };
         creator = &op.base;
     }
 
-    // 4. Return Result
+    // 3. Output
+    // We do NOT store 'out's address in the op.
     var out = VarT.init(allocator, data, needs_grad);
     out.creator = creator;
     return out;
