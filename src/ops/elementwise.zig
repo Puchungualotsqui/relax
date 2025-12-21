@@ -9,6 +9,13 @@ pub fn broadcastOp(dest: anytype, src: anytype, comptime op_scalar: anytype) !vo
         return;
     }
 
+    if (dest.isContiguous() and src.isContiguous() and std.mem.eql(usize, dest.shape, src.shape)) {
+        for (dest.data, src.data) |*d, s| {
+            op_scalar(d, s);
+        }
+        return;
+    }
+
     const d_ndim = dest.shape.len;
     const s_ndim = src.shape.len;
 
@@ -92,6 +99,16 @@ pub fn broadcastOp2(dest: anytype, src_a: anytype, src_b: anytype, comptime op_s
     if (dest.shape.len == 0) {
         // If dest is 0D, src_a and src_b must be 0D or 1-element tensors
         op_scalar(&dest.data[0], src_a.data[0], src_b.data[0]);
+        return;
+    }
+
+    if (dest.isContiguous() and src_a.isContiguous() and src_b.isContiguous() and
+        std.mem.eql(usize, dest.shape, src_a.shape) and
+        std.mem.eql(usize, dest.shape, src_b.shape))
+    {
+        for (dest.data, src_a.data, src_b.data) |*d, a, b| {
+            op_scalar(d, a, b);
+        }
         return;
     }
 
@@ -604,5 +621,63 @@ pub fn clip(dest: anytype, src: anytype, min_val: anytype, max_val: anytype) !vo
                 }
             }
         }
+    }
+}
+
+pub fn logSumExp(dest: anytype, src: anytype, axis: usize) !void {
+    const T = @TypeOf(src.data[0]);
+    const s_ndim = src.shape.len;
+
+    // 1. Find Max values along the axis for stability
+    // Use your existing reduce logic
+    const max_closures = struct {
+        fn apply(acc: *T, val: T) void { if (val > acc.*) acc.* = val; }
+    };
+    reduce(dest, src, axis, std.math.floatMin(T), max_closures.apply);
+
+    // 2. We need a temporary buffer to hold the sum of exps
+    // To keep it low-level, we use the dest buffer to store max,
+    // and another temporary buffer for the sum.
+    const allocator = dest.allocator;
+    var sum_exp = try allocator.alloc(T, dest.data.len);
+    defer allocator.free(sum_exp);
+    @memset(sum_exp, 0);
+
+    // 3. Fused Exp-Subtract-Sum
+    var indices = [_]usize{0} ** 16;
+    var src_off: usize = 0;
+    for (0..src.data.len) |_| {
+        var d_off: usize = 0;
+        var d_dim: usize = 0;
+        inline for (0..16) |j| {
+            if (j >= s_ndim) break;
+            if (j != axis) {
+                d_off += indices[j] * dest.strides[d_dim];
+                d_dim += 1;
+            }
+        }
+
+        const val = src.data[src_off];
+        const m = dest.data[d_off];
+        sum_exp[d_off] += std.math.exp(val - m);
+
+        // Standard Rolling Update
+        var j = s_ndim;
+        while (j > 0) {
+            j -= 1;
+            indices[j] += 1;
+            if (indices[j] < src.shape[j]) {
+                src_off += src.strides[j];
+                break;
+            } else {
+                src_off -= (src.shape[j] - 1) * src.strides[j];
+                indices[j] = 0;
+            }
+        }
+    }
+
+    // 4. Final step: dest = max + log(sum_exp)
+    for (dest.data, 0..) |*m, i| {
+        m.* += @log(sum_exp[i]);
     }
 }

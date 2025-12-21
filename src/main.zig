@@ -317,3 +317,18 @@ test "tensor clipping (method API)" {
     try std.testing.expectEqual(@as(f32, -1.0), res.at(&[_]usize{0}));
     try std.testing.expectEqual(@as(f32, 1.0), res.at(&[_]usize{1}));
 }
+
+test "logSumExp stability and correctness" {
+    const allocator = std.testing.allocator;
+
+    // Input: [1.0, 2.0, 3.0]
+    // Standard Math: log(exp(1) + exp(2) + exp(3))
+    // = log(2.718 + 7.389 + 20.085) = log(30.192) ≈ 3.4076
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{3}, &[_]f32{ 1.0, 2.0, 3.0 });
+    defer t.deinit();
+
+    var res = try t.logSumExp(allocator, 0);
+    defer res.deinit();
+
+    try std.testing.expect(std.math.approxEqAbs(f32, 3.4076, res.data[0], 0.001));
+}

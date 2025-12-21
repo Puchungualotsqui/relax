@@ -500,5 +500,27 @@ pub fn Tensor(comptime T: type) type {
             // Passing self.* dereferences the pointer to match 'anytype' in ops
             try ops.clip(self, self.*, min_val, max_val);
         }
+
+        pub fn logSumExp(self: Self, allocator: Allocator, axis: usize) !Self {
+            if (axis >= self.shape.len) return error.InvalidAxis;
+
+            // 1. Calculate reduction shape
+            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
+            defer allocator.free(new_shape);
+            var d: usize = 0;
+            for (self.shape, 0..) |s, i| {
+                if (i == axis) continue;
+                new_shape[d] = s;
+                d += 1;
+            }
+
+            // 2. Initialize destination
+            var dest = try Self.init(allocator, new_shape);
+
+            // 3. Call the fused operation
+            try ops.logSumExp(&dest, self, axis);
+
+            return dest;
+        }
     };
 }
