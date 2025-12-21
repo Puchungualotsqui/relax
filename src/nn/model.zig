@@ -293,5 +293,86 @@ pub fn Sequential(comptime T: type) type {
             // Return a clone of the raw data (detaching from graph)
             return try preds.ptr.data.clone();
         }
+
+        fn writeU64(file: std.fs.File, val: u64) !void {
+            var buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &buf, val, .little);
+            try file.writeAll(&buf);
+        }
+
+        fn readU64(file: std.fs.File) !u64 {
+            var buf: [8]u8 = undefined;
+            const n = try file.readAll(&buf);
+            if (n != 8) return error.EndOfStream;
+            return std.mem.readInt(u64, &buf, .little);
+        }
+
+        pub fn save(self: *Self, path: []const u8) !void {
+            const file = try std.fs.cwd().createFile(path, .{});
+            defer file.close();
+
+            const params = try self.parameters();
+            defer {
+                for (params.items) |p| p.deinit();
+                var p_list = params;
+                p_list.deinit(self.allocator);
+            }
+
+            // 1. Write Header
+            try file.writeAll("RELAX01");
+            try writeU64(file, params.items.len);
+
+            // 2. Write Tensors
+            for (params.items) |p| {
+                const tensor = p.ptr.data;
+
+                try writeU64(file, tensor.shape.len);
+
+                for (tensor.shape) |s| {
+                    try writeU64(file, s);
+                }
+
+                try file.writeAll(std.mem.sliceAsBytes(tensor.data));
+            }
+        }
+
+        pub fn load(self: *Self, path: []const u8) !void {
+            const file = try std.fs.cwd().openFile(path, .{});
+            defer file.close();
+
+            const params = try self.parameters();
+            defer {
+                for (params.items) |p| p.deinit();
+                var p_list = params;
+                p_list.deinit(self.allocator);
+            }
+
+            // 1. Read Header
+            var magic_buf: [7]u8 = undefined;
+            const magic_n = try file.readAll(&magic_buf);
+            if (magic_n != 7) return error.InvalidFileFormat;
+            if (!std.mem.eql(u8, &magic_buf, "RELAX01")) return error.InvalidFileFormat;
+
+            const count = try readU64(file);
+            if (count != params.items.len) return error.ParameterCountMismatch;
+
+            // 2. Read Tensors
+            for (params.items) |p| {
+                const target_tensor = p.ptr.data;
+
+                const rank = try readU64(file);
+                if (rank != target_tensor.shape.len) return error.ShapeMismatch;
+
+                for (target_tensor.shape) |expected_dim| {
+                    const saved_dim = try readU64(file);
+                    if (saved_dim != expected_dim) return error.ShapeMismatch;
+                }
+
+                // Read Data
+                const byte_slice = std.mem.sliceAsBytes(target_tensor.data);
+                const n = try file.readAll(byte_slice);
+                if (n != byte_slice.len) return error.EndOfStream;
+            }
+        }
     };
 }

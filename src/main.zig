@@ -14,13 +14,13 @@ pub const nn = struct {
 };
 
 test {
-    // 1. Reference the Tensor Math tests
     _ = @import("tests/tensor.zig");
 
-    // 2. Reference the Layer tests
     _ = @import("tests/layers.zig");
 
     _ = @import("tests/autograd.zig");
 
     _ = @import("tests/keraslike.zig");
+
+    _ = @import("tests/serialization.zig");
 }
