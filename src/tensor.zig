@@ -409,17 +409,6 @@ pub fn Tensor(comptime T: type) type {
             try ops.broadcastOp(self, other, closures.apply);
         }
 
-        pub fn addScalar(self: *Self, value: T) !void {
-            // Create a temporary 0D tensor view of the scalar
-            var scalar_val = value;
-            const scalar_tensor = .{
-                .data = @as([*]T, @ptrCast(&scalar_val))[0..1],
-                .shape = &[_]usize{},
-                .strides = &[_]usize{},
-            };
-            try self.addInPlace(scalar_tensor);
-        }
-
         pub fn matmul(self: Self, other: Self, dest: *Self) !void {
             return linalg.matmul(dest, self, other);
         }
@@ -520,6 +509,25 @@ pub fn Tensor(comptime T: type) type {
             // 3. Call the fused operation
             try ops.logSumExp(&dest, self, axis);
 
+            return dest;
+        }
+
+        pub fn addScalar(self: *Self, value: T) void {
+            ops.addScalar(self, self.*, value);
+        }
+
+        pub fn mulScalar(self: *Self, value: T) void {
+            ops.mulScalar(self, self.*, value);
+        }
+
+        pub fn powScalar(self: *Self, value: T) void {
+            ops.powScalar(self, self.*, value);
+        }
+
+        // Allocating version (Functional style)
+        pub fn scalarAdd(self: Self, value: T, allocator: Allocator) !Self {
+            var dest = try Self.init(allocator, self.shape);
+            ops.addScalar(&dest, self, value);
             return dest;
         }
     };

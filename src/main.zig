@@ -332,3 +332,26 @@ test "logSumExp stability and correctness" {
 
     try std.testing.expect(std.math.approxEqAbs(f32, 3.4076, res.data[0], 0.001));
 }
+
+test "scalar operations" {
+    const allocator = std.testing.allocator;
+
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{2, 2}, &[_]f32{ 1, 2, 3, 4 });
+    defer t.deinit();
+
+    // Test In-place Add
+    t.addScalar(10.0);
+    try std.testing.expectEqual(@as(f32, 11.0), t.at(&[_]usize{ 0, 0 }));
+
+    // Test In-place Mul
+    t.mulScalar(2.0);
+    try std.testing.expectEqual(@as(f32, 22.0), t.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 28.0), t.at(&[_]usize{ 1, 1 }));
+
+    // Test In-place Pow (2^2, 3^2, etc on original-ish values)
+    var t2 = try Tensor(f32).fromSlice(allocator, &[_]usize{2}, &[_]f32{ 2.0, 3.0 });
+    defer t2.deinit();
+    t2.powScalar(2.0);
+    try std.testing.expectEqual(@as(f32, 4.0), t2.at(&[_]usize{0}));
+    try std.testing.expectEqual(@as(f32, 9.0), t2.at(&[_]usize{1}));
+}
