@@ -1,35 +1,50 @@
 const std = @import("std");
 const Tensor = @import("../../tensor.zig").Tensor;
+const Variable = @import("../../autograd/variable.zig").Variable;
+const autograd_ops = @import("../../autograd/ops.zig");
 const initz = @import("../initializers.zig");
-const acts = @import("../activations.zig"); // Import the file containing the Union
+const acts = @import("../activations.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn Dense(comptime T: type) type {
     return struct {
         const Self = @This();
         pub const TensorT = Tensor(T);
-        pub const ActT = acts.Activation(T); // The Union Type
+        pub const VarT = Variable(T);
+        pub const ActT = acts.Activation(T);
 
         pub const Config = struct {
             in_features: usize,
             out_features: usize,
-            // LOOK: No complex function pointer signature! Just the Union.
             activation: ActT = .none,
             weight_init: *const fn (anytype, *initz.RandomSource) anyerror!void = initz.heNormal,
             bias_init: *const fn (anytype) void = initz.zeros,
+            // Optimization: whether this layer should track gradients
+            requires_grad: bool = true,
         };
 
-        weights: TensorT,
-        bias: TensorT,
-        activation: ActT, // Store the enum
+        // Parameters are now Variables
+        weights: VarT,
+        bias: VarT,
+        activation: ActT,
         allocator: Allocator,
 
         pub fn init(allocator: Allocator, config: Config, rng: *initz.RandomSource) !Self {
-            var weights = try TensorT.init(allocator, &[_]usize{ config.in_features, config.out_features });
-            var bias = try TensorT.init(allocator, &[_]usize{config.out_features});
+            // 1. Initialize Raw Tensors
+            var w_data = try TensorT.init(allocator, &[_]usize{ config.in_features, config.out_features });
+            errdefer w_data.deinit();
+            var b_data = try TensorT.init(allocator, &[_]usize{config.out_features});
+            errdefer b_data.deinit();
 
-            try config.weight_init(&weights, rng);
-            config.bias_init(&bias);
+            // 2. Apply Initializers
+            try config.weight_init(&w_data, rng);
+            config.bias_init(&b_data);
+
+            // 3. Wrap into Variables (Ownership moves to Variables)
+            const weights = try VarT.init(allocator, w_data, config.requires_grad);
+            errdefer weights.deinit();
+            const bias = try VarT.init(allocator, b_data, config.requires_grad);
+            errdefer bias.deinit();
 
             return Self{
                 .weights = weights,
@@ -44,27 +59,34 @@ pub fn Dense(comptime T: type) type {
             self.bias.deinit();
         }
 
-        pub fn forward(self: Self, input: TensorT) !TensorT {
-            if (input.shape.len < 2 or input.shape[input.shape.len - 1] != self.weights.shape[0]) {
-                return error.IncompatibleShapes;
+        /// Returns references to the trainable parameters
+        pub fn parameters(self: Self, list: *std.ArrayList(VarT)) !void {
+            try list.append(self.weights.clone());
+            try list.append(self.bias.clone());
+        }
+
+        /// Differentiable Forward Pass
+        pub fn forward(self: Self, input: VarT) !VarT {
+            // 1. Linear part
+            var mm = try autograd_ops.matmul(self.allocator, input, self.weights);
+            defer mm.deinit();
+
+            var out = try autograd_ops.add(self.allocator, mm, self.bias);
+
+            // 2. Activation part
+            switch (self.activation) {
+                .none => return out,
+                .relu => {
+                    defer out.deinit();
+                    return try autograd_ops.relu(self.allocator, out);
+                },
+                .sigmoid => {
+                    defer out.deinit(); // Free the linear output, return the activated one
+                    return try autograd_ops.sigmoid(self.allocator, out);
+                },
+                // Add Softmax/Tanh here in the future
+                else => return out,
             }
-
-            var out_shape = try self.allocator.dupe(usize, input.shape);
-            defer self.allocator.free(out_shape);
-            out_shape[out_shape.len - 1] = self.weights.shape[1];
-
-            var linear_out = try TensorT.init(self.allocator, out_shape);
-
-            // Fused MatMul
-            try input.linear(self.weights, self.bias, &linear_out);
-
-            // Apply Activation via the Union's dispatcher
-            // If it's .none, we just return linear_out (optimization to avoid copy)
-            if (self.activation == .none) return linear_out;
-
-            // Otherwise apply and free the intermediate
-            defer linear_out.deinit();
-            return try self.activation.forward(self.allocator, linear_out);
         }
     };
 }

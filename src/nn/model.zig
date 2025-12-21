@@ -1,18 +1,16 @@
 const std = @import("std");
-const Tensor = @import("../tensor.zig").Tensor;
+const Variable = @import("../autograd/variable.zig").Variable; // Added Import
 const Dense = @import("layers/dense.zig").Dense;
 const Allocator = std.mem.Allocator;
 
 /// The "Wrapper" for any layer type.
-/// As you build more layers (Dropout, Conv2D), add them here.
 pub fn Layer(comptime T: type) type {
     return union(enum) {
         dense: Dense(T),
         // dropout: Dropout(T),
-        // conv2d: Conv2D(T),
 
         const Self = @This();
-        const TensorT = Tensor(T);
+        const VarT = Variable(T); // Updated from TensorT to VarT
 
         pub fn deinit(self: Self) void {
             switch (self) {
@@ -20,9 +18,17 @@ pub fn Layer(comptime T: type) type {
             }
         }
 
-        pub fn forward(self: Self, input: TensorT) !TensorT {
+        // Updated signature to take Variable(T)
+        pub fn forward(self: Self, input: VarT) !VarT {
             switch (self) {
                 .dense => |l| return l.forward(input),
+            }
+        }
+
+        // Propagate parameter collection
+        pub fn parameters(self: Self, list: *std.ArrayList(VarT)) !void {
+            switch (self) {
+                .dense => |l| try l.parameters(list),
             }
         }
     };
@@ -33,16 +39,14 @@ pub fn Sequential(comptime T: type) type {
     return struct {
         const Self = @This();
         const LayerT = Layer(T);
-        const TensorT = Tensor(T);
+        const VarT = Variable(T); // Updated to VarT
 
         allocator: std.mem.Allocator,
-        // Switch to Unmanaged to match the behavior your compiler is enforcing
         layers: std.ArrayListUnmanaged(LayerT),
 
         pub fn init(allocator: std.mem.Allocator) Self {
             return Self{
                 .allocator = allocator,
-                // Unmanaged uses empty init
                 .layers = .{},
             };
         }
@@ -51,17 +55,28 @@ pub fn Sequential(comptime T: type) type {
             for (mut_self.layers.items) |layer| {
                 layer.deinit();
             }
-            // Pass the allocator to deinit
             mut_self.layers.deinit(mut_self.allocator);
         }
 
         pub fn add(mut_self: *Self, layer: LayerT) !void {
-            // Pass the allocator to append
             try mut_self.layers.append(mut_self.allocator, layer);
         }
 
-        pub fn forward(self: Self, input: TensorT) !TensorT {
-            if (self.layers.items.len == 0) return try input.clone();
+        // Collects all parameters from all layers
+        // Returns an ArrayList containing clones (refs) to every weight/bias in the model
+        pub fn parameters(self: Self) !std.ArrayList(VarT) {
+            var params = std.ArrayList(VarT).init(self.allocator);
+            errdefer params.deinit();
+
+            for (self.layers.items) |layer| {
+                try layer.parameters(&params);
+            }
+            return params;
+        }
+
+        // Updated signature to take Variable(T)
+        pub fn forward(self: Self, input: VarT) !VarT {
+            if (self.layers.items.len == 0) return input.clone();
 
             // First layer pass
             var current = try self.layers.items[0].forward(input);
@@ -70,7 +85,8 @@ pub fn Sequential(comptime T: type) type {
             var i: usize = 1;
             while (i < self.layers.items.len) : (i += 1) {
                 const next = try self.layers.items[i].forward(current);
-                current.deinit(); // Free intermediate tensor memory
+
+                current.deinit();
                 current = next;
             }
 

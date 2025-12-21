@@ -4,15 +4,14 @@ const Variable = @import("variable.zig").Variable;
 const Function = @import("function.zig").Function;
 const Allocator = std.mem.Allocator;
 
+// --- Addition Operation ---
+
 pub fn AddBackward(comptime T: type) type {
     return struct {
         base: Function(T),
         allocator: Allocator,
-
-        input_a: *Variable(T),
-        input_b: *Variable(T),
-
-        // The node owns the gradient for the variable it created!
+        input_a: Variable(T),
+        input_b: Variable(T),
         output_grad: Tensor(T),
 
         const Self = @This();
@@ -20,17 +19,16 @@ pub fn AddBackward(comptime T: type) type {
 
         pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-
-            // We use our OWN stored gradient
+            // We need a pointer to the gradient to pass to addInPlace if we wanted to be safe,
+            // but here we just read from self.output_grad.
+            // The issue in your code was likely in the BUILDER function, not here.
             const grad = self.output_grad;
 
-            if (self.input_a.requires_grad) {
-                // We ask the parent for its gradient pointer (handles leaf/non-leaf logic)
+            if (self.input_a.ptr.requires_grad) {
                 const a_grad = try self.input_a.getGrad();
                 try a_grad.addInPlace(grad);
             }
-
-            if (self.input_b.requires_grad) {
+            if (self.input_b.ptr.requires_grad) {
                 const b_grad = try self.input_b.getGrad();
                 try b_grad.addInPlace(grad);
             }
@@ -41,69 +39,65 @@ pub fn AddBackward(comptime T: type) type {
             return &self.output_grad;
         }
 
-        pub fn collectParents(ptr: *Function(T), list: *std.ArrayList(*Function(T))) !void {
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            if (self.input_a.creator) |c| try list.append(c);
-            if (self.input_b.creator) |c| try list.append(c);
+            // Append now requires allocator
+            if (self.input_a.ptr.creator) |c| try list.append(allocator, c);
+            if (self.input_b.ptr.creator) |c| try list.append(allocator, c);
         }
 
         pub fn deinit(ptr: *Function(T)) void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            // We own this tensor, so we free it
             self.output_grad.deinit();
+            self.input_a.deinit();
+            self.input_b.deinit();
             self.allocator.destroy(self);
         }
     };
 }
 
-pub fn add(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a.*) {
-    const T = @TypeOf(a.data.data[0]);
-    const VarT = Variable(T);
-    const OpT = AddBackward(T);
+pub fn add(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
+    const T = @TypeOf(a.ptr.data.data[0]);
 
-    // 1. Forward
-    const data = try a.data.add(b.data, allocator);
+    const data = try a.ptr.data.add(b.ptr.data, allocator);
+    const needs_grad = a.ptr.requires_grad or b.ptr.requires_grad;
 
-    // 2. Build Graph if needed
-    const needs_grad = a.requires_grad or b.requires_grad;
     var creator: ?*Function(T) = null;
-
     if (needs_grad) {
-        const op = try allocator.create(OpT);
+        const op = try allocator.create(AddBackward(T));
 
-        // Initialize the gradient tensor for this node (zeroed)
-        const grad = try Tensor(T).init(allocator, data.shape);
-        grad.fill(0); // Important!
+        // FIX: strict var for mutation
+        var grad = try Tensor(T).init(allocator, data.shape);
+        grad.fill(0);
 
         op.* = .{
             .base = .{
-                .backward_fn = OpT.backward,
-                .collect_parents_fn = OpT.collectParents,
-                .get_grad_fn = OpT.getGrad,
-                .deinit_fn = OpT.deinit,
+                .backward_fn = AddBackward(T).backward,
+                .collect_parents_fn = AddBackward(T).collectParents,
+                .get_grad_fn = AddBackward(T).getGrad,
+                .deinit_fn = AddBackward(T).deinit,
             },
             .allocator = allocator,
-            .input_a = a,
-            .input_b = b,
+            .input_a = a.clone(),
+            .input_b = b.clone(),
             .output_grad = grad,
         };
         creator = &op.base;
     }
 
-    // 3. Output
-    // We do NOT store 'out's address in the op.
-    var out = VarT.init(allocator, data, needs_grad);
-    out.creator = creator;
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
     return out;
 }
+
+// --- Matrix Multiplication Operation ---
 
 pub fn MatMulBackward(comptime T: type) type {
     return struct {
         base: Function(T),
         allocator: Allocator,
-
-        input_a: *Variable(T),
-        input_b: *Variable(T),
+        input_a: Variable(T),
+        input_b: Variable(T),
         output_grad: Tensor(T),
 
         const Self = @This();
@@ -111,51 +105,38 @@ pub fn MatMulBackward(comptime T: type) type {
 
         pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            const grad = self.output_grad; // G (dL/dC)
+            const grad = self.output_grad;
 
-            // 1. Calculate dL/dA = G @ B^T
-            if (self.input_a.requires_grad) {
-                // Create transpose permutation for B: swap last two dims
-                const ndim = self.input_b.data.shape.len;
+            if (self.input_a.ptr.requires_grad) {
+                const ndim = self.input_b.ptr.data.shape.len;
                 var dims = try self.allocator.alloc(usize, ndim);
                 defer self.allocator.free(dims);
-
-                // Initialize [0, 1, 2...]
                 for (0..ndim) |i| dims[i] = i;
-                // Swap last two for transpose
                 std.mem.swap(usize, &dims[ndim - 1], &dims[ndim - 2]);
 
-                // Create view B^T
-                var b_T = try self.input_b.data.permute(dims);
-                defer b_T.deinit(); // Decrement ref count on view
+                var b_T = try self.input_b.ptr.data.permute(dims);
+                defer b_T.deinit();
 
-                // Allocate temp gradient for A
-                var d_a = try TensorT.init(self.allocator, self.input_a.data.shape);
+                var d_a = try TensorT.init(self.allocator, self.input_a.ptr.data.shape);
                 defer d_a.deinit();
-
-                // Perform MatMul: G @ B^T
                 try grad.matmul(b_T, &d_a);
 
-                // Accumulate
                 const a_grad = try self.input_a.getGrad();
                 try a_grad.addInPlace(d_a);
             }
 
-            // 2. Calculate dL/dB = A^T @ G
-            if (self.input_b.requires_grad) {
-                const ndim = self.input_a.data.shape.len;
+            if (self.input_b.ptr.requires_grad) {
+                const ndim = self.input_a.ptr.data.shape.len;
                 var dims = try self.allocator.alloc(usize, ndim);
                 defer self.allocator.free(dims);
                 for (0..ndim) |i| dims[i] = i;
                 std.mem.swap(usize, &dims[ndim - 1], &dims[ndim - 2]);
 
-                var a_T = try self.input_a.data.permute(dims);
+                var a_T = try self.input_a.ptr.data.permute(dims);
                 defer a_T.deinit();
 
-                var d_b = try TensorT.init(self.allocator, self.input_b.data.shape);
+                var d_b = try TensorT.init(self.allocator, self.input_b.ptr.data.shape);
                 defer d_b.deinit();
-
-                // Perform MatMul: A^T @ G
                 try a_T.matmul(grad, &d_b);
 
                 const b_grad = try self.input_b.getGrad();
@@ -168,80 +149,70 @@ pub fn MatMulBackward(comptime T: type) type {
             return &self.output_grad;
         }
 
-        pub fn collectParents(ptr: *Function(T), list: *std.ArrayList(*Function(T))) !void {
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            if (self.input_a.creator) |c| try list.append(c);
-            if (self.input_b.creator) |c| try list.append(c);
+            if (self.input_a.ptr.creator) |c| try list.append(allocator, c);
+            if (self.input_b.ptr.creator) |c| try list.append(allocator, c);
         }
 
         pub fn deinit(ptr: *Function(T)) void {
             const self: *Self = @fieldParentPtr("base", ptr);
             self.output_grad.deinit();
+            self.input_a.deinit();
+            self.input_b.deinit();
             self.allocator.destroy(self);
         }
     };
 }
 
-/// Autograd-aware Matrix Multiplication
-pub fn matmul(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a.*) {
-    const T = @TypeOf(a.data.data[0]);
-    const VarT = Variable(T);
-    const OpT = MatMulBackward(T);
+pub fn matmul(allocator: Allocator, a: anytype, b: anytype) !@TypeOf(a) {
+    const T = @TypeOf(a.ptr.data.data[0]);
 
-    // 1. Compute Forward: C = A @ B
-    // We need to calculate output shape first to allocate result
-    // (Or let tensor.matmul handle allocation? Your tensor api takes a dest pointer)
-
-    // Quick shape calc logic (assuming 2D for simplicity, or copying logic from tensor.zig)
-    const a_ndim = a.data.shape.len;
-    const b_ndim = b.data.shape.len;
-    // ... basic validation omitted, relying on tensor.matmul to fail if wrong ...
-
-    // Create output shape: A[...:-1] + B[-1]
-    var out_shape = try allocator.alloc(usize, a_ndim); // simplified rank
+    const a_ndim = a.ptr.data.shape.len;
+    var out_shape = try allocator.alloc(usize, a_ndim);
     defer allocator.free(out_shape);
-    @memcpy(out_shape, a.data.shape);
-    out_shape[a_ndim - 1] = b.data.shape[b_ndim - 1];
+    @memcpy(out_shape, a.ptr.data.shape);
+    out_shape[a_ndim - 1] = b.ptr.data.shape[b.ptr.data.shape.len - 1];
 
     var data = try Tensor(T).init(allocator, out_shape);
-    try a.data.matmul(b.data, &data);
+    try a.ptr.data.matmul(b.ptr.data, &data);
 
-    // 2. Build Graph
-    const needs_grad = a.requires_grad or b.requires_grad;
+    const needs_grad = a.ptr.requires_grad or b.ptr.requires_grad;
     var creator: ?*Function(T) = null;
-
     if (needs_grad) {
-        const op = try allocator.create(OpT);
-        const grad = try Tensor(T).init(allocator, data.shape);
+        const op = try allocator.create(MatMulBackward(T));
+
+        // FIX: strict var for mutation
+        var grad = try Tensor(T).init(allocator, data.shape);
         grad.fill(0);
 
         op.* = .{
             .base = .{
-                .backward_fn = OpT.backward,
-                .collect_parents_fn = OpT.collectParents,
-                .get_grad_fn = OpT.getGrad,
-                .deinit_fn = OpT.deinit,
+                .backward_fn = MatMulBackward(T).backward,
+                .collect_parents_fn = MatMulBackward(T).collectParents,
+                .get_grad_fn = MatMulBackward(T).getGrad,
+                .deinit_fn = MatMulBackward(T).deinit,
             },
             .allocator = allocator,
-            .input_a = a,
-            .input_b = b,
+            .input_a = a.clone(),
+            .input_b = b.clone(),
             .output_grad = grad,
         };
         creator = &op.base;
     }
 
-    var out = VarT.init(allocator, data, needs_grad);
-    out.creator = creator;
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
     return out;
 }
 
-/// Backward Node for ReLU: y = max(0, x)
-/// Gradient: dL/dx = dL/dy * (1 if x > 0 else 0)
+// --- ReLU Operation ---
+
 pub fn ReLUBackward(comptime T: type) type {
     return struct {
         base: Function(T),
         allocator: Allocator,
-        input: *Variable(T),
+        input: Variable(T),
         output_grad: Tensor(T),
 
         const Self = @This();
@@ -249,28 +220,14 @@ pub fn ReLUBackward(comptime T: type) type {
 
         pub fn backward(ptr: *Function(T)) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            const grad = self.output_grad; // dL/dy
+            const grad = self.output_grad;
 
-            if (self.input.requires_grad) {
-                // mask = (input > 0) ? 1 : 0
-                // d_input = grad * mask
-
-                // We allocate a temporary tensor for the gradient contribution
-                var d_input = try TensorT.init(self.allocator, self.input.data.shape);
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
                 defer d_input.deinit();
 
-                // Optimized loop: d_input[i] = (input[i] > 0) ? grad[i] : 0
-                // Assuming contiguous for simplicity, but using flat iterators works generally
-                // if we had a flat iterator. For now, we assume contiguous or compatible strides.
-                // A robust implementation would use a broadcast kernel.
-
-                // Use a direct loop over data slice for performance (assuming contiguous)
-                // If not contiguous, we should use iterators.
-                const count = self.input.data.data.len;
-                for (0..count) |i| {
-                    const val = self.input.data.data[i];
-                    const g = grad.data[i];
-                    d_input.data[i] = if (val > 0) g else 0;
+                for (0..self.input.ptr.data.data.len) |i| {
+                    d_input.data[i] = if (self.input.ptr.data.data[i] > 0) grad.data[i] else 0;
                 }
 
                 const input_grad = try self.input.getGrad();
@@ -283,53 +240,140 @@ pub fn ReLUBackward(comptime T: type) type {
             return &self.output_grad;
         }
 
-        pub fn collectParents(ptr: *Function(T), list: *std.ArrayList(*Function(T))) !void {
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
             const self: *Self = @fieldParentPtr("base", ptr);
-            if (self.input.creator) |c| try list.append(c);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
         }
 
         pub fn deinit(ptr: *Function(T)) void {
             const self: *Self = @fieldParentPtr("base", ptr);
             self.output_grad.deinit();
+            self.input.deinit();
             self.allocator.destroy(self);
         }
     };
 }
 
-/// Autograd-aware ReLU
-pub fn relu(allocator: Allocator, a: anytype) !@TypeOf(a.*) {
-    const T = @TypeOf(a.data.data[0]);
-    const VarT = Variable(T);
-    const OpT = ReLUBackward(T);
+pub fn relu(allocator: Allocator, a: anytype) !@TypeOf(a) {
+    const T = @TypeOf(a.ptr.data.data[0]);
+    const data = try a.ptr.data.clipped(allocator, 0, std.math.inf(T));
 
-    // 1. Forward: y = clipped(x, 0, inf)
-    // We use the Tensor method 'clipped'
-    const data = try a.data.clipped(allocator, 0, std.math.inf(T));
-
-    // 2. Build Graph
-    const needs_grad = a.requires_grad;
+    const needs_grad = a.ptr.requires_grad;
     var creator: ?*Function(T) = null;
-
     if (needs_grad) {
-        const op = try allocator.create(OpT);
-        const grad = try Tensor(T).init(allocator, data.shape);
+        const op = try allocator.create(ReLUBackward(T));
+
+        // FIX: strict var for mutation
+        var grad = try Tensor(T).init(allocator, data.shape);
         grad.fill(0);
 
         op.* = .{
             .base = .{
-                .backward_fn = OpT.backward,
-                .collect_parents_fn = OpT.collectParents,
-                .get_grad_fn = OpT.getGrad,
-                .deinit_fn = OpT.deinit,
+                .backward_fn = ReLUBackward(T).backward,
+                .collect_parents_fn = ReLUBackward(T).collectParents,
+                .get_grad_fn = ReLUBackward(T).getGrad,
+                .deinit_fn = ReLUBackward(T).deinit,
             },
             .allocator = allocator,
-            .input = a,
+            .input = a.clone(),
             .output_grad = grad,
         };
         creator = &op.base;
     }
 
-    var out = VarT.init(allocator, data, needs_grad);
-    out.creator = creator;
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
+    return out;
+}
+
+// --- Sigmoid Operation ---
+
+pub fn SigmoidBackward(comptime T: type) type {
+    return struct {
+        base: Function(T),
+        allocator: Allocator,
+        input: Variable(T),
+        output_grad: Tensor(T),
+
+        const Self = @This();
+        const TensorT = Tensor(T);
+
+        pub fn backward(ptr: *Function(T)) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            const grad = self.output_grad;
+
+            if (self.input.ptr.requires_grad) {
+                var d_input = try TensorT.init(self.allocator, self.input.ptr.data.shape);
+                defer d_input.deinit();
+
+                const x_data = self.input.ptr.data.data;
+                const g_data = grad.data;
+                const d_data = d_input.data;
+
+                // dL/dx = grad * sigmoid(x) * (1 - sigmoid(x))
+                // We recompute sigmoid(x) here to avoid storing the output variable (breaking cycles)
+                for (0..x_data.len) |i| {
+                    const s = 1.0 / (1.0 + std.math.exp(-x_data[i]));
+                    d_data[i] = g_data[i] * s * (1.0 - s);
+                }
+
+                const input_grad = try self.input.getGrad();
+                try input_grad.addInPlace(d_input);
+            }
+        }
+
+        pub fn getGrad(ptr: *Function(T)) *TensorT {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            return &self.output_grad;
+        }
+
+        pub fn collectParents(ptr: *Function(T), allocator: Allocator, list: *std.ArrayListUnmanaged(*Function(T))) !void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            if (self.input.ptr.creator) |c| try list.append(allocator, c);
+        }
+
+        pub fn deinit(ptr: *Function(T)) void {
+            const self: *Self = @fieldParentPtr("base", ptr);
+            self.output_grad.deinit();
+            self.input.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+}
+
+pub fn sigmoid(allocator: Allocator, a: anytype) !@TypeOf(a) {
+    const T = @TypeOf(a.ptr.data.data[0]);
+
+    // 1. Forward
+    var data = try Tensor(T).init(allocator, a.ptr.data.shape);
+    const in_data = a.ptr.data.data;
+    for (0..in_data.len) |i| {
+        data.data[i] = 1.0 / (1.0 + std.math.exp(-in_data[i]));
+    }
+
+    // 2. Build Graph
+    const needs_grad = a.ptr.requires_grad;
+    var creator: ?*Function(T) = null;
+    if (needs_grad) {
+        const op = try allocator.create(SigmoidBackward(T));
+        var grad = try Tensor(T).init(allocator, data.shape);
+        grad.fill(0);
+
+        op.* = .{
+            .base = .{
+                .backward_fn = SigmoidBackward(T).backward,
+                .collect_parents_fn = SigmoidBackward(T).collectParents,
+                .get_grad_fn = SigmoidBackward(T).getGrad,
+                .deinit_fn = SigmoidBackward(T).deinit,
+            },
+            .allocator = allocator,
+            .input = a.clone(),
+            .output_grad = grad,
+        };
+        creator = &op.base;
+    }
+
+    var out = try Variable(T).init(allocator, data, needs_grad);
+    out.ptr.creator = creator;
     return out;
 }

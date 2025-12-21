@@ -1,7 +1,7 @@
 const std = @import("std");
 const Tensor = @import("../tensor.zig").Tensor;
 const Function = @import("function.zig").Function;
-const engine = @import("engine.zig"); // Import the topological sort engine
+const engine = @import("engine.zig");
 const Allocator = std.mem.Allocator;
 
 pub fn Variable(comptime T: type) type {
@@ -10,73 +10,83 @@ pub fn Variable(comptime T: type) type {
         const TensorT = Tensor(T);
         const FuncT = Function(T);
 
-        data: TensorT,
-        grad: ?TensorT = null,
-        requires_grad: bool,
+        // The actual data lives on the heap, shared by all copies of this Variable
+        pub const State = struct {
+            data: TensorT,
+            grad: ?TensorT = null,
+            creator: ?*FuncT = null,
+            requires_grad: bool,
+            ref_count: usize,
+            allocator: Allocator,
+        };
 
-        /// The operation that created this variable.
-        /// If null, this is a Leaf variable (Input or Weight).
-        creator: ?*FuncT = null,
+        ptr: *State,
 
-        allocator: Allocator,
-
-        pub fn init(allocator: Allocator, data: TensorT, requires_grad: bool) Self {
-            return Self{
+        /// Creates a new Variable. Takes ownership of 'data'.
+        pub fn init(allocator: Allocator, data: TensorT, requires_grad: bool) !Self {
+            const state = try allocator.create(State);
+            state.* = .{
                 .data = data,
                 .grad = null,
-                .requires_grad = requires_grad,
                 .creator = null,
+                .requires_grad = requires_grad,
+                .ref_count = 1,
                 .allocator = allocator,
             };
+            return Self{ .ptr = state };
         }
 
+        /// Creates a new reference to the same variable (increments ref_count).
+        /// Use this when storing the variable in a Graph Node or Optimizer list.
+        pub fn clone(self: Self) Self {
+            self.ptr.ref_count += 1;
+            return Self{ .ptr = self.ptr };
+        }
+
+        /// Decrements ref_count. Frees memory if count reaches 0.
         pub fn deinit(self: Self) void {
-            self.data.deinit();
-            // If we are a leaf, we own our gradient.
-            if (self.grad) |g| g.deinit();
-
-            // If we have a creator, we own it (it's a heap-allocated node).
-            // Its deinit() will handle freeing the 'output_grad' it holds.
-            if (self.creator) |c| c.deinit();
-        }
-
-        /// Smart Accessor: Finds the gradient tensor wherever it lives.
-        /// - If this is a computed variable, the gradient lives in 'creator'.
-        /// - If this is a leaf variable, the gradient lives in 'self.grad'.
-        pub fn getGrad(self: *Self) !*TensorT {
-            if (self.creator) |c| {
-                // Return the gradient stored in the Node
-                return c.getGrad();
-            } else {
-                // We are a Leaf. Lazily allocate gradient if missing.
-                if (self.grad == null) {
-                    self.grad = try TensorT.init(self.allocator, self.data.shape);
-                    self.grad.?.fill(0);
-                }
-                return &self.grad.?;
+            self.ptr.ref_count -= 1;
+            if (self.ptr.ref_count == 0) {
+                self.ptr.data.deinit();
+                if (self.ptr.grad) |g| g.deinit();
+                // Recursively free the creator (Graph cleanup)
+                if (self.ptr.creator) |c| c.deinit();
+                self.ptr.allocator.destroy(self.ptr);
             }
         }
 
-        /// Zeros the gradient (useful for Optimizers)
-        pub fn zeroGrad(self: *Self) !void {
+        // --- Accessors (proxies to ptr) ---
+
+        pub fn data_ptr(self: Self) TensorT {
+            return self.ptr.data;
+        }
+
+        pub fn getGrad(self: Self) !*TensorT {
+            if (self.ptr.creator) |c| {
+                return c.getGrad();
+            } else {
+                if (self.ptr.grad == null) {
+                    self.ptr.grad = try TensorT.init(self.ptr.allocator, self.ptr.data.shape);
+                    self.ptr.grad.?.fill(0);
+                }
+                return &self.ptr.grad.?;
+            }
+        }
+
+        pub fn zeroGrad(self: Self) !void {
             const g = try self.getGrad();
             g.fill(0);
         }
 
-        /// THE BIG RED BUTTON: Triggers Backpropagation
-        pub fn backward(self: *Self) !void {
-            if (self.creator == null) return; // Cannot backward on a leaf/constant
-
-            // 1. Seed the gradient at the end of the chain (Loss) to 1.0
+        pub fn backward(self: Self) !void {
+            if (self.ptr.creator == null) return;
             const g = try self.getGrad();
             g.fill(1.0);
 
-            // 2. Topological Sort to determine execution order
-            var graph = try engine.topologicalSort(self.allocator, self.creator.?);
-            defer graph.deinit();
+            var graph = try engine.topologicalSort(self.ptr.allocator, self.ptr.creator.?);
+            // UPDATED: Pass allocator to deinit
+            defer graph.deinit(self.ptr.allocator);
 
-            // 3. Execute Backward Pass
-            // The list is already reversed (Child -> Parent) by your engine logic.
             for (graph.items) |node| {
                 try node.backward();
             }

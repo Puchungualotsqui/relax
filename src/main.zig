@@ -19,4 +19,6 @@ test {
 
     // 2. Reference the Layer tests
     _ = @import("tests/layers.zig");
+
+    _ = @import("tests/autograd.zig");
 }

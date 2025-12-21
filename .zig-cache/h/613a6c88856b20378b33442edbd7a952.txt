@@ -1,6 +1,6 @@
 0
 15678 3021731 1761046366000000000 f0bdf7a0d76753ffab1319907ec69cf1 1 compiler/test_runner.zig
-701 4536038 1766311849815204185 a88a90b4c1f623f2b6207e2acc18e154 0 src/main.zig
+741 4536038 1766317276059851090 db749264aa769f215a6b7d6ef93b73fe 0 src/main.zig
 22376 3040920 1761046366000000000 2d968f90418b6afe5ba91eaa2e18ba71 1 ubsan_rt.zig
 755 4536039 1766184612269335325 2bba894099517c5964b8ab4cda17b74e 0 src/root.zig
 11083 3021733 1761046366000000000 3c8016eb348fede9a19b94ec4869d8a6 1 compiler_rt.zig
@@ -835,7 +835,7 @@
 419 3040749 1761046366000000000 ed7dfc04a5d0c4f0853edb5414ce981e 1 std/os/linux/bpf/btf_ext.zig
 24293 3040750 1761046366000000000 0c7d3ee9ea8e698a843ee6039fd161c4 1 std/os/linux/bpf/helpers.zig
 3221 3040497 1761046366000000000 fda67b74062c7f535bb0a6d0f1fe74fb 1 std/crypto/codecs/asn1/der/ArrayListReverse.zig
-701 4536038 1766311849815204185 a88a90b4c1f623f2b6207e2acc18e154 0 /mnt/storage/Documents/Projects/CS/Relax/src/main.zig
+741 4536038 1766317276059851090 db749264aa769f215a6b7d6ef93b73fe 0 /mnt/storage/Documents/Projects/CS/Relax/src/main.zig
 22971 4536072 1766312909874567714 22513337d9cfe9a3d80a8d1a5df17d45 0 /mnt/storage/Documents/Projects/CS/Relax/src/tensor.zig
 6295 4540668 1766305587993875448 91f8178d82be95f5a493f81b46fd9a97 0 /mnt/storage/Documents/Projects/CS/Relax/src/ops/linalg.zig
 12463 4542468 1766306101125119677 cceabb8f03063c4c152b44c62b289abe 0 /mnt/storage/Documents/Projects/CS/Relax/src/ops/base.zig
@@ -843,11 +843,16 @@
 6489 4542474 1766307505573869820 adf3ae16328c83a6b07fe28d5cad5761 0 /mnt/storage/Documents/Projects/CS/Relax/src/ops/reductions.zig
 6544 4542471 1766306761084690710 e866e65890ede24dc519006749292731 0 /mnt/storage/Documents/Projects/CS/Relax/src/ops/binary.zig
 7518 4542475 1766308406384127298 fe10c3c9016dc94f4003924c6e1f5dd4 0 /mnt/storage/Documents/Projects/CS/Relax/src/ops/unary.zig
-2635 4542620 1766312806611354043 6720d92756f12e0aae3999516188ba53 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/layers/dense.zig
+3435 4542620 1766318207423052173 d34107939bbe0885948c778b900a768e 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/layers/dense.zig
 2858 4542618 1766312793036326579 72db840873ab375856f8524f24a7ea9a 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/activations.zig
 1892 4542623 1766312171943332464 586b43e417eb63981a0a2f963c94bc73 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/initializers.zig
 16713 4542648 1766311417391494430 cb36344320940056ca0b89a794fe5e78 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/tensor.zig
-3639 4542649 1766313394795649330 3424bb556c43625b9ffbd89730f83283 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/layers.zig
+3867 4542649 1766317249191756025 e5c5934616dfdbd0a88f9e3932482203 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/layers.zig
+4304 4542828 1766317389195254579 f21e13e448b8490a46232d8a5a65a004 0 /mnt/storage/Documents/Projects/CS/Relax/src/tests/autograd.zig
 94 4536075 1766186815151044421 49acf197b584e4b154aab7542f8c507f 0 /mnt/storage/Documents/Projects/CS/Relax/src/errors.zig
-2408 4542624 1766313229798270437 e3be818b6a121d103a7810c98f336bdd 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/model.zig
+3130 4542827 1766317969526921647 4217fa1d90b46ad5b23348051908812f 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/variable.zig
+13064 4542880 1766318188647965813 397393ae282714d72f0611820122a4b7 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/ops.zig
+2907 4542624 1766316458391214883 c7d775ff522aaaec8efc12115fd5456c 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/model.zig
 3461 4542796 1766313363217576183 a54ba0a959c604feb96aa3c08cdf71e4 0 /mnt/storage/Documents/Projects/CS/Relax/src/nn/loss.zig
+1095 4542851 1766317905302600167 2b89ac95456fe672d968c95686e55dbc 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/function.zig
+1528 4542903 1766317895450550104 9c05456f563f428aac1da686f8156e18 0 /mnt/storage/Documents/Projects/CS/Relax/src/autograd/engine.zig
