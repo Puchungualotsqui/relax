@@ -227,20 +227,21 @@ test "argmax reduction" {
 test "mean and variance" {
     const allocator = std.testing.allocator;
 
-    // 1D Tensor [1, 2, 3, 4, 5, 6] -> Mean 3.5
     var t = try Tensor(f32).fromSlice(allocator, &[_]usize{6}, &[_]f32{ 1, 2, 3, 4, 5, 6 });
     defer t.deinit();
 
     const mu = try t.mean(allocator, 0);
     defer mu.deinit();
-    try std.testing.expectEqual(@as(f32, 3.5), mu.data[0]);
+    // mu is now a 0D Tensor (Scalar). .at(&[_]usize{}) is the proper way to access.
+    try std.testing.expectEqual(@as(f32, 3.5), mu.at(&[_]usize{}));
 
-    const res = try t.var_std(allocator, 0);
-    defer res.v.deinit();
-    defer res.s.deinit();
+    const v = try t.variance(allocator, 0);
+    defer v.deinit();
+    try std.testing.expect(std.math.approxEqAbs(f32, 2.9167, v.at(&[_]usize{}), 0.001));
 
-    // Variance of 1..6 is ~2.9167
-    try std.testing.expect(std.math.approxEqAbs(f32, 2.9167, res.v.data[0], 0.001));
+    const sd = try t.stdDev(allocator, 0);
+    defer sd.deinit();
+    try std.testing.expect(std.math.approxEqAbs(f32, 1.7078, sd.at(&[_]usize{}), 0.001));
 }
 
 test "tensor where selection (method API)" {
@@ -336,7 +337,7 @@ test "logSumExp stability and correctness" {
 test "scalar operations" {
     const allocator = std.testing.allocator;
 
-    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{2, 2}, &[_]f32{ 1, 2, 3, 4 });
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 2, 3, 4 });
     defer t.deinit();
 
     // Test In-place Add
@@ -408,4 +409,70 @@ test "fused matmul with bias (linear layer)" {
     try std.testing.expectEqual(@as(f32, 110.0), res.at(&[_]usize{ 0, 1 }));
     try std.testing.expectEqual(@as(f32, 155.0), res.at(&[_]usize{ 1, 0 }));
     try std.testing.expectEqual(@as(f32, 230.0), res.at(&[_]usize{ 1, 1 }));
+}
+
+test "tensor unary API" {
+    const allocator = std.testing.allocator;
+    var t = try Tensor(f32).fromSlice(allocator, &[_]usize{3}, &[_]f32{ 0.0, 1.0, 2.0 });
+    defer t.deinit();
+
+    // Test Allocating Exp
+    var t_exp = try t.exp(allocator);
+    defer t_exp.deinit();
+    try std.testing.expectEqual(@as(f32, 1.0), t_exp.at(&[_]usize{0})); // exp(0)
+
+    // Test In-place Scalar Add
+    t.addScalar(10.0);
+    try std.testing.expectEqual(@as(f32, 10.0), t.at(&[_]usize{0}));
+}
+
+test "binary arithmetic and comparison" {
+    const allocator = std.testing.allocator;
+
+    var a = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 2, 3, 4 });
+    defer a.deinit();
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 5, 6, 7, 8 });
+    defer b.deinit();
+
+    // Test Allocating Add
+    var c = try a.add(b, allocator);
+    defer c.deinit();
+    try std.testing.expectEqual(@as(f32, 6.0), c.at(&[_]usize{ 0, 0 }));
+
+    // Alternatively, comparing two tensors:
+    var gt_mask = try b.gt(a, allocator);
+    defer gt_mask.deinit();
+    try std.testing.expectEqual(@as(u8, 1), gt_mask.at(&[_]usize{ 0, 0 }));
+}
+
+test "linalg: linear layer (fused matmul + bias)" {
+    const allocator = std.testing.allocator;
+
+    // Input X (Batch=2, Features=2)
+    var x = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 2 }, &[_]f32{ 1, 2, 3, 4 });
+    defer x.deinit();
+
+    // Weights W (In=2, Out=3)
+    var w = try Tensor(f32).fromSlice(allocator, &[_]usize{ 2, 3 }, &[_]f32{ 1, 0, 1, 0, 1, 1 });
+    defer w.deinit();
+
+    // Bias B (Out=3)
+    var b = try Tensor(f32).fromSlice(allocator, &[_]usize{3}, &[_]f32{ 10, 20, 30 });
+    defer b.deinit();
+
+    // Output Result (Batch=2, Out=3)
+    var res = try Tensor(f32).init(allocator, &[_]usize{ 2, 3 });
+    defer res.deinit();
+
+    // Execution
+    try x.linear(w, b, &res);
+
+    // Expected logic:
+    // row0: [1*1 + 2*0 + 10,  1*0 + 2*1 + 20,  1*1 + 2*1 + 30] = [11, 22, 33]
+    // row1: [3*1 + 4*0 + 10,  3*0 + 4*1 + 20,  3*1 + 4*1 + 30] = [13, 24, 37]
+
+    try std.testing.expectEqual(@as(f32, 11.0), res.at(&[_]usize{ 0, 0 }));
+    try std.testing.expectEqual(@as(f32, 22.0), res.at(&[_]usize{ 0, 1 }));
+    try std.testing.expectEqual(@as(f32, 33.0), res.at(&[_]usize{ 0, 2 }));
+    try std.testing.expectEqual(@as(f32, 37.0), res.at(&[_]usize{ 1, 2 }));
 }

@@ -174,3 +174,46 @@ pub fn logSumExp(dest: anytype, src: anytype, axis: usize) !void {
         m.* += @log(sum_exp[i]);
     }
 }
+
+pub fn argmax(dest: anytype, max_vals: anytype, src: anytype, axis: usize) void {
+    const s_ndim = src.shape.len;
+    var indices = [_]usize{0} ** 16;
+    var src_offset: usize = 0;
+
+    // Initialize tracking buffer to negative infinity
+    const T = @TypeOf(src.data[0]);
+    max_vals.fill(std.math.floatMin(T));
+
+    for (0..src.data.len) |_| {
+        // Calculate destination offset
+        var d_offset: usize = 0;
+        var d_dim: usize = 0;
+        inline for (0..16) |dim| {
+            if (dim >= s_ndim) break;
+            if (dim != axis) {
+                d_offset += indices[dim] * dest.strides[d_dim];
+                d_dim += 1;
+            }
+        }
+
+        const current_val = src.data[src_offset];
+        if (current_val > max_vals.data[d_offset]) {
+            max_vals.data[d_offset] = current_val;
+            dest.data[d_offset] = indices[axis];
+        }
+
+        // Rolling index update
+        var j = s_ndim;
+        while (j > 0) {
+            j -= 1;
+            indices[j] += 1;
+            if (indices[j] < src.shape[j]) {
+                src_offset += src.strides[j];
+                break;
+            } else {
+                src_offset -= (src.shape[j] - 1) * src.strides[j];
+                indices[j] = 0;
+            }
+        }
+    }
+}

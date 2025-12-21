@@ -74,15 +74,20 @@ pub fn Tensor(comptime T: type) type {
             self.storage.deinit();
         }
 
-        pub fn gt(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
-            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
-            defer allocator.free(out_shape);
+        fn refreshStrides(self: Self) void {
+            var acc: usize = 1;
+            var i: usize = self.shape.len;
+            while (i > 0) {
+                i -= 1;
+                self.strides[i] = acc;
+                acc *= self.shape[i];
+            }
+        }
 
-            var result = try Tensor(u8).init(allocator, out_shape);
-
-            try greaterThan(&result, self, other);
-
-            return result;
+        fn calculateSize(shape: []const usize) usize {
+            var total: usize = 1;
+            for (shape) |dim| total *= dim;
+            return total;
         }
 
         // Helper to check if memory is contiguous (needed for SIMD)
@@ -107,91 +112,28 @@ pub fn Tensor(comptime T: type) type {
             return self;
         }
 
-        // Creates a fresh, contiguous copy of the tensor
-        pub fn clone(self: Self) !Self {
-            var new_tensor = try Self.init(self.allocator, self.shape);
-
-            // If self is contiguous, we can use fast @memcpy
-            if (self.isContiguous()) {
-                const size = calculateSize(self.shape);
-                @memcpy(new_tensor.data, self.data[0..size]);
-            } else {
-                try self.copyTo(&new_tensor);
-            }
-            return new_tensor;
-        }
-
-        // Internal helper to copy data based on strides
+        // We also need to add back the internal copyTo helper used by arithmetic operations
         fn copyTo(self: Self, dest: *Self) !void {
             if (calculateSize(self.shape) != calculateSize(dest.shape)) return error.IncompatibleShapes;
 
-            // A simple copy is just a broadcastOp where the 'op' is assignment
+            // Simple assignment op closure
             const closure = struct {
                 fn apply(d: *T, s: T) void {
                     d.* = s;
                 }
             }.apply;
 
-            // Use our new logic
-            base.broadcastOp(dest, self, closure);
+            try base.broadcastOp(dest, self, closure);
         }
 
-        pub fn reshape(self: *Self, new_shape: []const usize) !void {
-            if (calculateSize(new_shape) != calculateSize(self.shape)) return error.IncompatibleShapes;
-
-            // Create new metadata
-            const new_shape_copy = try self.allocator.dupe(usize, new_shape);
-            const new_strides = try self.allocator.alloc(usize, new_shape.len);
-
-            // Free OLD metadata
-            self.allocator.free(self.shape);
-            self.allocator.free(self.strides);
-
-            // Assign new metadata
-            self.shape = new_shape_copy;
-            self.strides = new_strides;
-
-            // Recalculate strides based on the NEW shape
-            var acc: usize = 1;
-            var i: usize = self.shape.len;
-            while (i > 0) {
-                i -= 1;
-                self.strides[i] = acc;
-                acc *= self.shape[i];
-            }
-        }
-
-        pub fn transpose(self: *Self) void {
-            std.mem.reverse(usize, self.shape);
-            std.mem.reverse(usize, self.strides);
-        }
-
-        fn refreshStrides(self: Self) void {
-            var acc: usize = 1;
-            var i: usize = self.shape.len;
-            while (i > 0) {
-                i -= 1;
-                self.strides[i] = acc;
-                acc *= self.shape[i];
-            }
-        }
-
-        fn calculateSize(shape: []const usize) usize {
-            var total: usize = 1;
-            for (shape) |dim| total *= dim;
-            return total;
-        }
-
-        /// Converts multi-dimensional indices to a flat data offset
-        pub fn calculateOffset(self: Self, indices: []const usize) usize {
-            var offset: usize = 0;
-            for (indices, 0..) |idx, i| {
-                offset += idx * self.strides[i];
-            }
-            return offset;
-        }
-
+        /// Returns the value at the specified multi-dimensional indices.
         pub fn at(self: Self, indices: []const usize) T {
+            // Safety check: indices length should match rank
+            if (indices.len != self.shape.len) {
+                // In a scalar case (rank 0), indices.len is 0, which is correct.
+                if (self.shape.len == 0) return self.data[0];
+            }
+
             var offset: usize = 0;
             for (indices, 0..) |idx, i| {
                 offset += idx * self.strides[i];
@@ -199,63 +141,35 @@ pub fn Tensor(comptime T: type) type {
             return self.data[offset];
         }
 
-        pub fn fill(self: *Self, value: T) void {
-            if (self.isContiguous()) {
-                const size = calculateSize(self.shape);
-                @memset(self.data[0..size], value);
-            } else {
-                self.fillStrided(self.data, 0, 0, value);
+        /// Sets the value at the specified multi-dimensional indices.
+        pub fn set(self: *Self, indices: []const usize, value: T) void {
+            if (self.shape.len == 0) {
+                self.data[0] = value;
+                return;
             }
-        }
 
-        // Helper for non-contiguous filling
-        fn fillStrided(self: *Self, buffer: []T, dim: usize, offset: usize, value: T) void {
-            if (dim == self.shape.len - 1) {
-                const stride = self.strides[dim];
-                var ptr = offset;
-                for (0..self.shape[dim]) |_| {
-                    buffer[ptr] = value;
-                    ptr += stride;
-                }
-            } else {
-                const stride = self.strides[dim];
-                var ptr = offset;
-                for (0..self.shape[dim]) |_| {
-                    self.fillStrided(buffer, dim + 1, ptr, value);
-                    ptr += stride;
-                }
+            var offset: usize = 0;
+            for (indices, 0..) |idx, i| {
+                offset += idx * self.strides[i];
             }
+            self.data[offset] = value;
         }
 
-        pub fn slice(self: *Self, axis: usize, start: usize, end: usize) !Self {
-            if (axis >= self.shape.len) return error.InvalidAxis;
-            if (start >= end or end > self.shape[axis]) return error.InvalidRange;
-
-            const offset = start * self.strides[axis];
-
-            const new_shape = try self.allocator.dupe(usize, self.shape);
-            const new_strides = try self.allocator.dupe(usize, self.strides);
-
-            new_shape[axis] = end - start;
-
-            self.storage.ref_count += 1;
-
-            return Self{
-                .data = self.data[offset..],
-                .storage = self.storage,
-                .shape = new_shape,
-                .strides = new_strides,
-                .allocator = self.allocator,
-            };
+        pub fn transpose(self: *Self) void {
+            if (self.shape.len < 2) return;
+            const n = self.shape.len;
+            std.mem.swap(usize, &self.shape[n - 1], &self.shape[n - 2]);
+            std.mem.swap(usize, &self.strides[n - 1], &self.strides[n - 2]);
         }
 
-        pub fn concatenate(allocator: std.mem.Allocator, tensors: []const Self, axis: usize) !Self {
+        /// Static method to join multiple tensors along an axis.
+        pub fn concatenate(allocator: Allocator, tensors: []const Self, axis: usize) !Self {
             if (tensors.len == 0) return error.EmptyInput;
             const ndim = tensors[0].shape.len;
+            if (axis >= ndim) return error.InvalidAxis;
 
-            var new_shape = try allocator.alloc(usize, ndim);
+            var new_shape = try allocator.dupe(usize, tensors[0].shape);
             defer allocator.free(new_shape);
-            @memcpy(new_shape, tensors[0].shape);
 
             var concat_dim_size: usize = 0;
             for (tensors) |t| {
@@ -265,290 +179,328 @@ pub fn Tensor(comptime T: type) type {
             new_shape[axis] = concat_dim_size;
 
             var dest = try Self.init(allocator, new_shape);
-
             try metadata.concat(&dest, tensors, axis);
-
             return dest;
         }
 
-        pub fn argmax(self: Self, allocator: std.mem.Allocator, axis: usize) !Tensor(usize) {
+        pub fn slice(self: Self, axis: usize, start: usize, end: usize) !Self {
             if (axis >= self.shape.len) return error.InvalidAxis;
+            if (start >= end or end > self.shape[axis]) return error.InvalidRange;
 
-            // 1. New shape has one fewer dimension (the collapsed axis)
-            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
-            defer allocator.free(new_shape);
-            var d: usize = 0;
-            for (self.shape, 0..) |s, i| {
-                if (i == axis) continue;
-                new_shape[d] = s;
-                d += 1;
-            }
+            // Calculate the new pointer offset based on the stride of the sliced axis
+            const offset = start * self.strides[axis];
 
-            // 2. We return a Tensor of indices (usize)
-            var dest = try Tensor(usize).init(allocator, new_shape);
+            // Duplicate metadata because the slice will have a different shape/stride locally
+            const new_shape = try self.allocator.dupe(usize, self.shape);
+            const new_strides = try self.allocator.dupe(usize, self.strides);
 
-            // 3. We need a temporary tensor to track the values to compare against
-            var max_vals = try Self.init(allocator, new_shape);
-            defer max_vals.deinit();
-            max_vals.fill(std.math.floatMin(T));
+            // Update the size of the specific dimension we are slicing
+            new_shape[axis] = end - start;
 
-            // 4. Use your rolling pointer logic to iterate
-            const s_ndim = self.shape.len;
-            var indices = [_]usize{0} ** 16;
-            var src_offset: usize = 0;
+            // Increment reference count as this view shares the same Storage
+            self.storage.ref_count += 1;
 
-            for (0..self.data.len) |_| {
-                // Map current src to dest offset
-                var d_offset: usize = 0;
-                var d_dim: usize = 0;
-                for (0..s_ndim) |dim| {
-                    if (dim == axis) continue;
-                    d_offset += indices[dim] * dest.strides[d_dim];
-                    d_dim += 1;
-                }
-
-                const current_val = self.data[src_offset];
-                if (current_val > max_vals.data[d_offset]) {
-                    max_vals.data[d_offset] = current_val;
-                    dest.data[d_offset] = indices[axis]; // Save the index!
-                }
-
-                // Rolling index update
-                var j = s_ndim;
-                while (j > 0) {
-                    j -= 1;
-                    indices[j] += 1;
-                    if (indices[j] < self.shape[j]) {
-                        src_offset += self.strides[j];
-                        break;
-                    } else {
-                        src_offset -= (self.shape[j] - 1) * self.strides[j];
-                        indices[j] = 0;
-                    }
-                }
-            }
-
-            return dest;
+            return Self{
+                .data = self.data[offset..], // Pointer arithmetic happens here
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
         }
 
-        pub fn max(self: Self, allocator: Allocator, axis: usize) !Self {
-            if (axis >= self.shape.len) return error.InvalidAxis;
+        // --- ARITHMETIC (Allocating) ---
 
-            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
-            defer allocator.free(new_shape);
-            var d_idx: usize = 0;
-            for (self.shape, 0..) |s, i| {
-                if (i == axis) continue;
-                new_shape[d_idx] = s;
-                d_idx += 1;
-            }
-
-            var dest = try Self.init(allocator, new_shape);
-
-            // Initialize with smallest possible value for the type
-            dest.fill(std.math.floatMin(T));
-
-            const max_closure = struct {
-                fn apply(acc: *T, val: T) void {
-                    if (val > acc.*) acc.* = val;
-                }
-            }.apply;
-
-            base.reduce(&dest, self, axis, std.math.floatMin(T), max_closure);
-            return dest;
-        }
-
-        pub fn mean(self: Self, allocator: Allocator, axis: usize) !Self {
-            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
-            defer allocator.free(new_shape);
-            var d: usize = 0;
-            for (self.shape, 0..) |s, i| {
-                if (i == axis) continue;
-                new_shape[d] = s;
-                d += 1;
-            }
-
-            var dest = try Self.init(allocator, new_shape);
-            reductions.mean(&dest, self, axis);
-            return dest;
-        }
-
-        pub fn var_std(self: Self, allocator: Allocator, axis: usize) !struct { v: Self, s: Self } {
-            const mu = try self.mean(allocator, axis);
-            defer mu.deinit();
-
-            var v_res = try Self.init(allocator, mu.shape);
-            reductions.variance(&v_res, self, mu, axis);
-
-            // Standard Deviation is just sqrt(variance)
-            var s_res = try Self.init(allocator, mu.shape);
-            const sqrt_op = struct {
-                fn apply(d: *T, s: T) void {
-                    d.* = std.math.sqrt(s);
-                }
-            }.apply;
-            try base.mapOp(&s_res, v_res, sqrt_op);
-
-            return .{ .v = v_res, .s = s_res };
-        }
-
-        pub fn add(self: Self, other: Self, allocator: Allocator) !Self {
+        pub fn add(self: Self, other: anytype, allocator: Allocator) !Self {
             const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
             defer allocator.free(out_shape);
-
             var dest = try Self.init(allocator, out_shape);
-
-            const closures = struct {
-                fn apply(d: *T, s1: T, s2: T) void {
-                    d.* = s1 + s2;
-                }
-            };
-
-            // Use broadcastOp2 for dest = src1 + src2
-            try base.broadcastOp2(&dest, self, other, closures.apply);
+            // Initialize dest with self then add other, or use broadcastOp2 logic
+            try self.copyTo(&dest);
+            try binary.add(&dest, other);
             return dest;
         }
 
-        pub fn addInPlace(self: *Self, other: Self) !void {
-            const closures = struct {
-                fn apply(d: *T, s: T) void {
-                    d.* += s;
-                }
-            };
-            // broadcastOp already validates if 'other' can fit into 'self'
-            try base.broadcastOp(self, other, closures.apply);
-        }
-
-        pub fn matmul(self: Self, other: Self, dest: *Self) !void {
-            return linalg.matmul(dest, self, other, null);
-        }
-
-        pub fn linear(self: Self, weights: Self, bias: Self, dest: *Self) !void {
-            return linalg.matmul(dest, self, weights, bias);
-        }
-
-        pub fn sum(self: Self, allocator: std.mem.Allocator, axis: usize) !Self {
-            if (axis >= self.shape.len) return error.InvalidAxis;
-
-            // Create the smaller shape
-            var new_shape = try allocator.alloc(usize, self.shape.len - 1);
-            defer allocator.free(new_shape);
-            var d: usize = 0;
-            for (self.shape, 0..) |s, i| {
-                if (i == axis) continue;
-                new_shape[d] = s;
-                d += 1;
-            }
-
-            var dest = try Self.init(allocator, new_shape);
-
-            // Reduction closure
-            // We use 'T' directly here because it is visible in this scope
-            const closures = struct {
-                fn add(acc: *T, val: T) void {
-                    acc.* += val;
-                }
-            };
-
-            base.reduce(&dest, self, axis, @as(T, 0), closures.add);
+        pub fn sub(self: Self, other: anytype, allocator: Allocator) !Self {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Self.init(allocator, out_shape);
+            try self.copyTo(&dest);
+            try binary.sub(&dest, other);
             return dest;
         }
 
-        pub fn equal(dest: anytype, a: anytype, b: anytype) !void {
-            const closures = struct {
-                fn apply(d: *u8, val_a: anytype, val_b: anytype) void {
-                    d.* = if (val_a == val_b) 1 else 0;
-                }
-            };
-            try base.broadcastOp2(dest, a, b, closures.apply);
-        }
-
-        pub fn greaterThan(dest: anytype, a: anytype, b: anytype) !void {
-            const closures = struct {
-                fn apply(d: *u8, val_a: anytype, val_b: anytype) void {
-                    d.* = if (val_a > val_b) 1 else 0;
-                }
-            };
-            try base.broadcastOp2(dest, a, b, closures.apply);
-        }
-
-        pub fn where(allocator: Allocator, mask: Tensor(u8), a: Self, b: Self) !Self {
-            // 1. Determine the result shape (mask, a, and b must be broadcast-compatible)
-            // For now, we assume they follow the shape of the mask.
-            var dest = try Self.init(allocator, mask.shape);
-
-            // 2. Call the optimized operation
-            try binary.where(&dest, mask, a, b);
-
+        pub fn mul(self: Self, other: anytype, allocator: Allocator) !Self {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Self.init(allocator, out_shape);
+            try self.copyTo(&dest);
+            try binary.mul(&dest, other);
             return dest;
         }
+
+        pub fn div(self: Self, other: anytype, allocator: Allocator) !Self {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Self.init(allocator, out_shape);
+            try self.copyTo(&dest);
+            try binary.div(&dest, other);
+            return dest;
+        }
+
+        // --- ARITHMETIC (In-place) ---
+
+        pub fn addInPlace(self: *Self, other: anytype) !void {
+            try binary.add(self, other);
+        }
+
+        pub fn subInPlace(self: *Self, other: anytype) !void {
+            try binary.sub(self, other);
+        }
+
+        pub fn mulInPlace(self: *Self, other: anytype) !void {
+            try binary.mul(self, other);
+        }
+
+        pub fn divInPlace(self: *Self, other: anytype) !void {
+            try binary.div(self, other);
+        }
+
+        // --- COMPARISON (Returns Tensor(u8)) ---
+
+        pub fn eq(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Tensor(u8).init(allocator, out_shape);
+            try binary.equal(&dest, self, other);
+            return dest;
+        }
+
+        pub fn gt(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Tensor(u8).init(allocator, out_shape);
+            try binary.greaterThan(&dest, self, other);
+            return dest;
+        }
+
+        pub fn lt(self: Self, other: anytype, allocator: Allocator) !Tensor(u8) {
+            const out_shape = try base.calculateBroadcastShape(allocator, self.shape, other.shape);
+            defer allocator.free(out_shape);
+            var dest = try Tensor(u8).init(allocator, out_shape);
+            try binary.lessThan(&dest, self, other);
+            return dest;
+        }
+
+        // --- SELECTION ---
 
         /// Method style: mask.select(a, b)
+        /// Note: This is meant to be called on a Tensor(u8)
         pub fn select(self: anytype, a: anytype, b: anytype, allocator: Allocator) !@TypeOf(a) {
-            // Ensure we use 'Self' (which is Tensor(T)) to match the input types
             var dest = try @TypeOf(a).init(allocator, self.shape);
             try binary.where(&dest, self, a, b);
             return dest;
         }
 
-        /// Returns a new tensor clipped to [min, max]
+        // --- UNARY MATH (Allocating) ---
+
+        pub fn fill(self: *Self, value: T) void {
+            unary.fill(self, value);
+        }
+
+        pub fn exp(self: Self, allocator: Allocator) !Self {
+            var dest = try Self.init(allocator, self.shape);
+            try unary.exp(&dest, self);
+            return dest;
+        }
+
+        pub fn log(self: Self, allocator: Allocator) !Self {
+            var dest = try Self.init(allocator, self.shape);
+            try unary.log(&dest, self);
+            return dest;
+        }
+
+        pub fn sqrt(self: Self, allocator: Allocator) !Self {
+            var dest = try Self.init(allocator, self.shape);
+            try unary.sqrt(&dest, self);
+            return dest;
+        }
+
         pub fn clipped(self: Self, allocator: Allocator, min_val: T, max_val: T) !Self {
             var dest = try Self.init(allocator, self.shape);
             try unary.clip(&dest, self, min_val, max_val);
             return dest;
         }
 
-        /// Clips the current tensor in-place
+        // --- UNARY MATH (In-place) ---
+
+        pub fn expInPlace(self: *Self) !void {
+            try unary.exp(self, self.*);
+        }
+
+        pub fn logInPlace(self: *Self) !void {
+            try unary.log(self, self.*);
+        }
+
+        pub fn sqrtInPlace(self: *Self) !void {
+            try unary.sqrt(self, self.*);
+        }
+
         pub fn clipInPlace(self: *Self, min_val: T, max_val: T) !void {
-            // Passing self.* dereferences the pointer to match 'anytype' in ops
             try unary.clip(self, self.*, min_val, max_val);
         }
 
-        pub fn logSumExp(self: Self, allocator: Allocator, axis: usize) !Self {
-            if (axis >= self.shape.len) return error.InvalidAxis;
+        // --- SCALAR MATH ---
 
-            // 1. Calculate reduction shape
+        pub fn addScalar(self: *Self, val: T) void {
+            unary.addScalar(self, self.*, val);
+        }
+
+        pub fn subScalar(self: *Self, val: T) void {
+            unary.subScalar(self, self.*, val);
+        }
+
+        pub fn mulScalar(self: *Self, val: T) void {
+            unary.mulScalar(self, self.*, val);
+        }
+
+        pub fn divScalar(self: *Self, val: T) void {
+            unary.divScalar(self, self.*, val);
+        }
+
+        pub fn powScalar(self: *Self, val: T) void {
+            unary.powScalar(self, self.*, val);
+        }
+
+        // --- INTERNAL HELPER ---
+        fn createReductionShape(self: Self, allocator: Allocator, axis: usize) ![]usize {
+            if (axis >= self.shape.len) return error.InvalidAxis;
             var new_shape = try allocator.alloc(usize, self.shape.len - 1);
-            defer allocator.free(new_shape);
             var d: usize = 0;
             for (self.shape, 0..) |s, i| {
                 if (i == axis) continue;
                 new_shape[d] = s;
                 d += 1;
             }
+            return new_shape;
+        }
 
-            // 2. Initialize destination
+        // --- REDUCTIONS ---
+
+        pub fn sum(self: Self, allocator: Allocator, axis: usize) !Self {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
             var dest = try Self.init(allocator, new_shape);
+            reductions.sum(&dest, self, axis);
+            return dest;
+        }
 
-            // 3. Call the fused operation
+        pub fn max(self: Self, allocator: Allocator, axis: usize) !Self {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
+            var dest = try Self.init(allocator, new_shape);
+            reductions.max(&dest, self, axis);
+            return dest;
+        }
+
+        pub fn min(self: Self, allocator: Allocator, axis: usize) !Self {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
+            var dest = try Self.init(allocator, new_shape);
+            reductions.min(&dest, self, axis);
+            return dest;
+        }
+
+        pub fn mean(self: Self, allocator: Allocator, axis: usize) !Self {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
+            var dest = try Self.init(allocator, new_shape);
+            reductions.mean(&dest, self, axis);
+            return dest;
+        }
+
+        pub fn variance(self: Self, allocator: Allocator, axis: usize) !Self {
+            const mu = try self.mean(allocator, axis);
+            defer mu.deinit();
+            var dest = try Self.init(allocator, mu.shape);
+            reductions.variance(&dest, self, mu, axis);
+            return dest;
+        }
+
+        pub fn stdDev(self: Self, allocator: Allocator, axis: usize) !Self {
+            // 1. Calculate variance. Ownership of 'v' begins here.
+            var v = try self.variance(allocator, axis);
+
+            // 2. If sqrtInPlace fails, we MUST free 'v'.
+            errdefer v.deinit();
+
+            // 3. Perform the square root.
+            try v.sqrtInPlace();
+
+            // 4. Return 'v'. No defer will run on success.
+            return v;
+        }
+
+        pub fn logSumExp(self: Self, allocator: Allocator, axis: usize) !Self {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
+            var dest = try Self.init(allocator, new_shape);
             try reductions.logSumExp(&dest, self, axis);
-
             return dest;
         }
 
-        pub fn addScalar(self: *Self, value: T) void {
-            unary.addScalar(self, self.*, value);
-        }
+        pub fn argmax(self: Self, allocator: Allocator, axis: usize) !Tensor(usize) {
+            const new_shape = try self.createReductionShape(allocator, axis);
+            defer allocator.free(new_shape);
 
-        pub fn mulScalar(self: *Self, value: T) void {
-            unary.mulScalar(self, self.*, value);
-        }
+            // Note: argmax returns indices, so it produces a Tensor(usize)
+            var dest = try Tensor(usize).init(allocator, new_shape);
+            var max_vals = try Self.init(allocator, new_shape);
+            defer max_vals.deinit();
 
-        pub fn powScalar(self: *Self, value: T) void {
-            unary.powScalar(self, self.*, value);
-        }
-
-        // Allocating version (Functional style)
-        pub fn scalarAdd(self: Self, value: T, allocator: Allocator) !Self {
-            var dest = try Self.init(allocator, self.shape);
-            unary.addScalar(&dest, self, value);
+            reductions.argmax(&dest, &max_vals, self, axis);
             return dest;
         }
 
-        /// Adds a dimension of size 1 at the specified axis.
-        pub fn unsqueeze(self: *const Self, axis: usize) !Self {
+        // --- SHAPE MANIPULATION ($O(1)$ Views) ---
+
+        pub fn reshape(self: *Self, new_shape: []const usize) !void {
+            if (calculateSize(new_shape) != calculateSize(self.shape)) return error.IncompatibleShapes;
+
+            const new_shape_copy = try self.allocator.dupe(usize, new_shape);
+            const new_strides = try self.allocator.alloc(usize, new_shape.len);
+
+            self.allocator.free(self.shape);
+            self.allocator.free(self.strides);
+
+            self.shape = new_shape_copy;
+            self.strides = new_strides;
+            self.refreshStrides();
+        }
+
+        pub fn flatten(self: Self) !Self {
+            if (!self.isContiguous()) {
+                var contig = try self.clone();
+                defer contig.deinit();
+                return try contig.flatten();
+            }
+
+            const new_shape = try self.allocator.alloc(usize, 1);
+            const new_strides = try self.allocator.alloc(usize, 1);
+            try metadata.flatten(new_shape, new_strides, self.shape, true);
+
+            self.storage.ref_count += 1;
+            return Self{
+                .data = self.data,
+                .storage = self.storage,
+                .shape = new_shape,
+                .strides = new_strides,
+                .allocator = self.allocator,
+            };
+        }
+
+        pub fn unsqueeze(self: Self, axis: usize) !Self {
             if (axis > self.shape.len) return error.InvalidAxis;
-
             const new_ndim = self.shape.len + 1;
             const new_shape = try self.allocator.alloc(usize, new_ndim);
             const new_strides = try self.allocator.alloc(usize, new_ndim);
@@ -557,8 +509,6 @@ pub fn Tensor(comptime T: type) type {
             for (0..new_ndim) |new_i| {
                 if (new_i == axis) {
                     new_shape[new_i] = 1;
-                    // The stride for a dimension of size 1 can be anything,
-                    // but we usually use the stride of the next dimension.
                     new_strides[new_i] = if (old_i < self.strides.len) self.strides[old_i] else 1;
                 } else {
                     new_shape[new_i] = self.shape[old_i];
@@ -577,8 +527,7 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
-        /// Removes a dimension of size 1 at the specified axis.
-        pub fn squeeze(self: *const Self, axis: usize) !Self {
+        pub fn squeeze(self: Self, axis: usize) !Self {
             if (axis >= self.shape.len) return error.InvalidAxis;
             if (self.shape[axis] != 1) return error.DimensionNotSqueezable;
 
@@ -604,17 +553,8 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
-        /// Reorders axes based on the provided dimensions.
-        /// Example: permute(&[_]usize{0, 2, 1}) swaps the last two dimensions.
-        pub fn permute(self: *const Self, dims: []const usize) !Self {
-            if (dims.len != self.shape.len) return error.InvalidRank;
-
-            // Check if dims is a valid permutation of [0...rank-1]
-            var check = [_]bool{false} ** 16;
-            for (dims) |d| {
-                if (d >= self.shape.len or check[d]) return error.InvalidPermutation;
-                check[d] = true;
-            }
+        pub fn permute(self: Self, dims: []const usize) !Self {
+            try metadata.validatePermutation(self.shape.len, dims);
 
             const new_shape = try self.allocator.alloc(usize, self.shape.len);
             const new_strides = try self.allocator.alloc(usize, self.shape.len);
@@ -634,32 +574,38 @@ pub fn Tensor(comptime T: type) type {
             };
         }
 
-        pub fn flatten(self: *const Self) !Self {
-            if (!self.isContiguous()) {
-                // Flattening a non-contiguous tensor requires a copy (clone) first
-                // to ensure the 1D view matches the expected logical order.
-                var contiguous_self = try self.clone();
-                defer contiguous_self.deinit();
-                return try contiguous_self.flatten();
+        // --- JOINING (Allocating) ---
+
+        pub fn concat(allocator: Allocator, tensors: []const Self, axis: usize) !Self {
+            if (tensors.len == 0) return error.EmptyInput;
+            const ndim = tensors[0].shape.len;
+            if (axis >= ndim) return error.InvalidAxis;
+
+            var new_shape = try allocator.dupe(usize, tensors[0].shape);
+            defer allocator.free(new_shape);
+
+            var concat_dim_size: usize = 0;
+            for (tensors) |t| {
+                if (t.shape.len != ndim) return error.IncompatibleShapes;
+                concat_dim_size += t.shape[axis];
             }
+            new_shape[axis] = concat_dim_size;
 
-            const new_shape = try self.allocator.alloc(usize, 1);
-            const new_strides = try self.allocator.alloc(usize, 1);
+            var dest = try Self.init(allocator, new_shape);
+            try metadata.concat(&dest, tensors, axis);
+            return dest;
+        }
 
-            var total: usize = 1;
-            for (self.shape) |s| total *= s;
+        /// Standard Matrix Multiplication: dest = self * other
+        pub fn matmul(self: Self, other: Self, dest: *Self) !void {
+            // Pass null for the bias parameter
+            return linalg.matmul(dest, self, other, null);
+        }
 
-            new_shape[0] = total;
-            new_strides[0] = 1;
-
-            self.storage.ref_count += 1;
-            return Self{
-                .data = self.data,
-                .storage = self.storage,
-                .shape = new_shape,
-                .strides = new_strides,
-                .allocator = self.allocator,
-            };
+        /// Fused Linear Layer: dest = (self * weights) + bias
+        /// This is much faster than doing matmul() then add()
+        pub fn linear(self: Self, weights: Self, bias: Self, dest: *Self) !void {
+            return linalg.matmul(dest, self, weights, bias);
         }
     };
 }

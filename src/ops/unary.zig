@@ -1,6 +1,56 @@
 const std = @import("std");
 const base = @import("base.zig");
 
+/// Fills the destination tensor with a specific scalar value.
+pub fn fill(dest: anytype, value: anytype) void {
+    // OPTIMIZATION: Linear memset for contiguous tensors
+    if (dest.isContiguous()) {
+        @memset(dest.data, value);
+        return;
+    }
+
+    // Fallback: Stride-aware filling using your recursive or iterative logic
+    const ndim = dest.shape.len;
+    if (ndim == 0) {
+        dest.data[0] = value;
+        return;
+    }
+
+    const inner_len = dest.shape[ndim - 1];
+    const outer_elements = dest.data.len / inner_len;
+    const stride = dest.strides[ndim - 1];
+
+    var indices = [_]usize{0} ** 16;
+    var cur_dest: usize = 0;
+
+    for (0..outer_elements) |block_idx| {
+        // Inner loop
+        if (stride == 1) {
+            @memset(dest.data[cur_dest..][0..inner_len], value);
+        } else {
+            for (0..inner_len) |k| {
+                dest.data[cur_dest + k * stride] = value;
+            }
+        }
+
+        // Rolling Index Update
+        if (ndim > 1 and block_idx < outer_elements - 1) {
+            var j = ndim - 1;
+            while (j > 0) {
+                j -= 1;
+                indices[j] += 1;
+                if (indices[j] < dest.shape[j]) {
+                    cur_dest += dest.strides[j];
+                    break;
+                } else {
+                    indices[j] = 0;
+                    cur_dest -= (dest.shape[j] - 1) * dest.strides[j];
+                }
+            }
+        }
+    }
+}
+
 pub fn exp(dest: anytype, src: anytype) !void {
     const closures = struct {
         fn apply(d: anytype, s: anytype) void {
